@@ -9,21 +9,28 @@ st.set_page_config(layout="wide", page_title="NASA SRTM elevation Explorer")
 
 # --- AUTHENTICATION LOGIC ---
 try:
+    # Determine which secret key holds the JSON
+    json_key = None
     if 'json_data' in st.secrets:
-        # For Streamlit Cloud: Use Service Account from Secrets
-        sa_info = json.loads(st.secrets['json_data'])
-        credentials = ee.ServiceAccountCredentials(
-            st.secrets.get('service_account', sa_info.get('client_email')),
-            key_data=st.secrets['json_data']
-        )
-        ee.Initialize(credentials, project='ee-innovativegeographer')
+        json_key = 'json_data'
     elif 'EE_SERVICE_ACCOUNT' in st.secrets:
-        # Fallback for old style Service Account from Secrets
-        sa_info = json.loads(st.secrets['EE_SERVICE_ACCOUNT'])
-        credentials = ee.ServiceAccountCredentials(
-            sa_info['client_email'],
-            key_data=st.secrets['EE_SERVICE_ACCOUNT']
+        json_key = 'EE_SERVICE_ACCOUNT'
+
+    if json_key:
+        # For Streamlit Cloud: write JSON secret to a temp file
+        # (avoids json.loads escape-character issues with TOML strings)
+        service_account_json = st.secrets[json_key]
+        key_path = os.path.join(tempfile.gettempdir(), 'ee_service_account.json')
+        with open(key_path, 'w') as f:
+            f.write(service_account_json)
+
+        # Read email from the secret or from the JSON file
+        sa_email = st.secrets.get(
+            'service_account',
+            json.load(open(key_path))['client_email']
         )
+
+        credentials = ee.ServiceAccountCredentials(sa_email, key_file=key_path)
         ee.Initialize(credentials, project='ee-innovativegeographer')
     else:
         # For Local Development: Falls back to local 'earthengine authenticate' credentials
