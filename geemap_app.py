@@ -16,9 +16,16 @@ st.title("🌍 Earth Engine SRTM DEM Explorer — Cuttack")
 @st.cache_resource
 def init_ee():
     try:
-        if 'EE_SERVICE_ACCOUNT' in st.secrets:
+        if 'json_data' in st.secrets:
             # For Streamlit Cloud: Use Service Account from Secrets
-            import json
+            sa_info = json.loads(st.secrets['json_data'])
+            credentials = ee.ServiceAccountCredentials(
+                st.secrets.get('service_account', sa_info.get('client_email')),
+                key_data=st.secrets['json_data']
+            )
+            ee.Initialize(credentials, project='ee-innovativegeographer')
+        elif 'EE_SERVICE_ACCOUNT' in st.secrets:
+            # Fallback for old style secrets
             sa_info = json.loads(st.secrets['EE_SERVICE_ACCOUNT'])
             credentials = ee.ServiceAccountCredentials(
                 sa_info['client_email'],
@@ -30,8 +37,8 @@ def init_ee():
             ee.Initialize(project='ee-innovativegeographer')
     except Exception as e:
         st.error("🔑 **Earth Engine Authentication Failed**")
-        st.info("To fix this on Streamlit Cloud, ensure you have added your service account JSON to `.streamlit/secrets.toml` or the Streamlit Dashboard Secrets box.")
-        st.code("""EE_SERVICE_ACCOUNT = '''\n{\n  "type": "service_account",\n  ...\n}'''""", language="toml")
+        st.info("To fix this on Streamlit Cloud, ensure you have added your service account JSON to the Streamlit Dashboard Secrets box using `json_data` and `service_account` keys.")
+        st.code("""json_data = '''\n{\n  "type": "service_account",\n  ...\n}'''\n\nservice_account = '...'""", language="toml")
         st.write(f"**Error Details:** {e}")
         st.stop()
 
