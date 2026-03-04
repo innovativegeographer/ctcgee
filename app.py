@@ -46,13 +46,23 @@ with st.echo():
     import geemap.foliumap as geemap
     from streamlit_folium import folium_static
 
-    # 1. Initialize Earth Engine (Change project ID if necessary)
+    import json
+    # --- AUTHENTICATION LOGIC ---
     try:
-        ee.Initialize(project='ee-innovativegeographer')
-    except Exception:
-        # If running locally, you might need to authenticate first
-        # ee.Authenticate()
-        ee.Initialize(project='ee-innovativegeographer')
+        if 'EE_SERVICE_ACCOUNT' in st.secrets:
+            # For Streamlit Cloud: Use Service Account from Secrets
+            sa_info = json.loads(st.secrets['EE_SERVICE_ACCOUNT'])
+            credentials = ee.ServiceAccountCredentials(
+                sa_info['client_email'],
+                key_data=st.secrets['EE_SERVICE_ACCOUNT']
+            )
+            ee.Initialize(credentials, project='ee-innovativegeographer')
+        else:
+            # For Local Development: Use User Authentication
+            ee.Initialize(project='ee-innovativegeographer')
+    except Exception as e:
+        st.error(f"Earth Engine Initialization failed: {e}")
+        st.stop()
 
     # 2. Define location (Cuttack, Odisha)
     lat, lon = 20.4625, 85.8828
