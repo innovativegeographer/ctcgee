@@ -1,8 +1,6 @@
 streamlit
 streamlit-folium
-geemap
-leafmap
+earthengine-api
+folium
 click==8
 fpdf
-python-box>=7.0.0
-xyzservices==2024.9.0

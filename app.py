@@ -3,9 +3,11 @@ import ee
 import json
 import tempfile
 import os
+import folium
+from streamlit_folium import folium_static
 
 # --- PREMIUM PAGE STYLING ---
-st.set_page_config(layout="wide", page_title="NASA SRTM elevation Explorer")
+st.set_page_config(layout="wide", page_title="NASA SRTM Elevation Explorer")
 
 # --- AUTHENTICATION LOGIC ---
 try:
@@ -33,7 +35,7 @@ try:
         credentials = ee.ServiceAccountCredentials(sa_email, key_file=key_path)
         ee.Initialize(credentials, project='ee-innovativegeographer')
     else:
-        # For Local Development: Falls back to local 'earthengine authenticate' credentials
+        # For Local Development
         ee.Initialize(project='ee-innovativegeographer')
 except Exception as e:
     st.error("🔑 **Earth Engine Authentication Failed**")
@@ -42,74 +44,87 @@ except Exception as e:
     st.write(f"**Error Details:** {e}")
     st.stop()
 
-import geemap.foliumap as geemap
-from streamlit_folium import folium_static
-
-# Inject custom CSS for a premium "Folium Example" look
+# Inject custom CSS for a premium look
 st.markdown("""
 <style>
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;700;800&display=swap');
-    
+
     html, body, [data-testid="stSidebar"] {
         font-family: 'Inter', sans-serif;
     }
-    
+
     h1 {
         font-weight: 800;
         color: #1e293b;
         letter-spacing: -1px;
         margin-bottom: 0.5rem;
     }
-    
-    .stEcho {
-        background-color: #ffffff;
-        border: 1px solid #e2e8f0;
-        border-radius: 12px;
-        padding: 20px;
-        box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1);
-    }
-    
+
     .main {
         background-color: #f8fafc;
     }
 </style>
 """, unsafe_allow_html=True)
 
-st.title("🛰️ NASA SRTM Global elevation")
+st.title("🛰️ NASA SRTM Global Elevation")
 st.write("A clean demonstration of using Google Earth Engine with Streamlit & Folium.")
 
-# --- THE CODE BLOCK (AS SEEN IN THE USER'S SCREENSHOT) ---
+# --- MAP SECTION ---
 with st.echo():
-    # 2. Define location (Cuttack, Odisha)
+    # 1. Define location (Cuttack, Odisha)
     lat, lon = 20.4625, 85.8828
-    
-    # 3. Load the SRTM Elevation dataset
+
+    # 2. Load the SRTM Elevation dataset
     srtm = ee.Image('USGS/SRTMGL1_003')
 
-    # 4. Set visualization parameters (Premium Palette)
+    # 3. Set visualization parameters
     vis_params = {
         'min': 0,
         'max': 100,
         'palette': ['#006633', '#E5FFCC', '#662A00', '#D8D8D8', '#F5F5F5']
     }
 
-    # 5. Create a Map centered on the location
-    m = geemap.Map(center=[lat, lon], zoom=12)
+    # 4. Get EE tile URL for the DEM layer
+    dem_map_id = srtm.getMapId(vis_params)
 
-    # 6. Add SRTM Layer
-    m.addLayer(srtm, vis_params, 'SRTM Elevation')
-    
-    # 7. Add a Hillshade layer for the "WOW" texture factor
+    # 5. Get EE tile URL for Hillshade layer
     hillshade = ee.Terrain.hillshade(srtm)
-    m.addLayer(hillshade, {'opacity': 0.3}, 'Hillshade (3D Texture)')
+    hillshade_map_id = hillshade.getMapId({'min': 0, 'max': 255})
 
-    # 8. Add a marker for the city center
-    m.add_marker([lat, lon], tooltip="Cuttack City Center")
+    # 6. Create a Folium Map centered on the location
+    m = folium.Map(location=[lat, lon], zoom_start=12)
 
-    # 9. Add Layer Control for easy toggling
-    m.addLayerControl()
+    # 7. Add SRTM DEM tile layer
+    folium.TileLayer(
+        tiles=dem_map_id['tile_fetcher'].url_format,
+        attr='Google Earth Engine - SRTM DEM',
+        name='SRTM Elevation',
+        overlay=True,
+        control=True
+    ).add_to(m)
 
-    # 10. Call to render Folium map in Streamlit
+    # 8. Add Hillshade tile layer for 3D texture
+    folium.TileLayer(
+        tiles=hillshade_map_id['tile_fetcher'].url_format,
+        attr='Google Earth Engine - Hillshade',
+        name='Hillshade (3D Texture)',
+        overlay=True,
+        control=True,
+        opacity=0.3
+    ).add_to(m)
+
+    # 9. Add a marker for the city center
+    folium.Marker(
+        location=[lat, lon],
+        popup='Cuttack City Center',
+        tooltip='Cuttack City Center',
+        icon=folium.Icon(color='red', icon='info-sign')
+    ).add_to(m)
+
+    # 10. Add Layer Control for easy toggling
+    folium.LayerControl().add_to(m)
+
+    # 11. Render the Folium map in Streamlit
     folium_static(m, width=1200, height=600)
 
 st.success("✅ Map rendered successfully using Earth Engine tiles.")
