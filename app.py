@@ -1,10 +1,34 @@
 import streamlit as st
 import ee
-import geemap.foliumap as geemap
-from streamlit_folium import folium_static
+import json
+import tempfile
+import os
 
 # --- PREMIUM PAGE STYLING ---
 st.set_page_config(layout="wide", page_title="NASA SRTM elevation Explorer")
+
+# --- AUTHENTICATION LOGIC ---
+try:
+    if 'EE_SERVICE_ACCOUNT' in st.secrets:
+        # For Streamlit Cloud: Use Service Account from Secrets
+        sa_info = json.loads(st.secrets['EE_SERVICE_ACCOUNT'])
+        credentials = ee.ServiceAccountCredentials(
+            sa_info['client_email'],
+            key_data=st.secrets['EE_SERVICE_ACCOUNT']
+        )
+        ee.Initialize(credentials, project='ee-innovativegeographer')
+    else:
+        # For Local Development: Falls back to local 'earthengine authenticate' credentials
+        ee.Initialize(project='ee-innovativegeographer')
+except Exception as e:
+    st.error("🔑 **Earth Engine Authentication Failed**")
+    st.info("To fix this on Streamlit Cloud, ensure you have added your service account JSON to `.streamlit/secrets.toml` or the Streamlit Dashboard Secrets box.")
+    st.code("""EE_SERVICE_ACCOUNT = '''\n{\n  "type": "service_account",\n  ...\n}'''""", language="toml")
+    st.write(f"**Error Details:** {e}")
+    st.stop()
+
+import geemap.foliumap as geemap
+from streamlit_folium import folium_static
 
 # Inject custom CSS for a premium "Folium Example" look
 st.markdown("""
@@ -41,36 +65,6 @@ st.write("A clean demonstration of using Google Earth Engine with Streamlit & Fo
 
 # --- THE CODE BLOCK (AS SEEN IN THE USER'S SCREENSHOT) ---
 with st.echo():
-    import streamlit as st
-    import ee
-    import geemap.foliumap as geemap
-    from streamlit_folium import folium_static
-
-    import json
-    import tempfile
-    import os
-
-    # --- AUTHENTICATION LOGIC ---
-    try:
-        if 'EE_SERVICE_ACCOUNT' in st.secrets:
-            # For Streamlit Cloud: Use Service Account from Secrets
-            import json
-            sa_info = json.loads(st.secrets['EE_SERVICE_ACCOUNT'])
-            credentials = ee.ServiceAccountCredentials(
-                sa_info['client_email'],
-                key_data=st.secrets['EE_SERVICE_ACCOUNT']
-            )
-            ee.Initialize(credentials, project='ee-innovativegeographer')
-        else:
-            # For Local Development: Falls back to local 'earthengine authenticate' credentials
-            ee.Initialize(project='ee-innovativegeographer')
-    except Exception as e:
-        st.error("🔑 **Earth Engine Authentication Failed**")
-        st.info("To fix this on Streamlit Cloud, ensure you have added your service account JSON to `.streamlit/secrets.toml` or the Streamlit Dashboard Secrets box.")
-        st.code("""EE_SERVICE_ACCOUNT = '''\n{\n  "type": "service_account",\n  ...\n}'''""", language="toml")
-        st.write(f"**Error Details:** {e}")
-        st.stop()
-
     # 2. Define location (Cuttack, Odisha)
     lat, lon = 20.4625, 85.8828
     
