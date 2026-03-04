@@ -9,7 +9,9 @@ import urllib.request
 from streamlit_folium import st_folium
 from fpdf import FPDF
 from datetime import datetime
-import math
+import plotly.graph_objects as go
+import plotly.express as px
+import numpy as np
 
 # --- PREMIUM PAGE STYLING ---
 st.set_page_config(layout="wide", page_title="NASA SRTM Elevation Explorer")
@@ -45,60 +47,26 @@ except Exception as e:
 st.markdown("""
 <style>
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap');
-
-    html, body, [data-testid="stSidebar"] {
-        font-family: 'Inter', sans-serif;
-    }
-
+    html, body, [data-testid="stSidebar"] { font-family: 'Inter', sans-serif; }
     h1 {
         font-weight: 800;
         background: linear-gradient(135deg, #006633, #00994d);
         -webkit-background-clip: text;
         -webkit-text-fill-color: transparent;
         letter-spacing: -1px;
-        margin-bottom: 0.5rem;
     }
-
-    .main {
-        background-color: #f8fafc;
-    }
-
-    [data-testid="stMetricValue"] {
-        font-size: 1.4rem;
-        font-weight: 700;
-    }
-
-    [data-testid="stSidebar"] {
-        background: linear-gradient(180deg, #0a1628 0%, #132742 100%);
-    }
-
-    [data-testid="stSidebar"] * {
-        color: #e2e8f0 !important;
-    }
-
+    .main { background-color: #f8fafc; }
+    [data-testid="stMetricValue"] { font-size: 1.4rem; font-weight: 700; }
+    [data-testid="stSidebar"] { background: linear-gradient(180deg, #0a1628 0%, #132742 100%); }
+    [data-testid="stSidebar"] * { color: #e2e8f0 !important; }
     div[data-testid="stMetric"] {
-        background: white;
-        border: 1px solid #e2e8f0;
-        border-radius: 12px;
-        padding: 14px 18px;
+        background: white; border: 1px solid #e2e8f0;
+        border-radius: 12px; padding: 14px 18px;
         box-shadow: 0 2px 8px rgba(0,0,0,0.04);
     }
-
     .draw-info-box {
         background: linear-gradient(135deg, #f0fdf4, #dcfce7);
-        border: 1px solid #86efac;
-        border-radius: 12px;
-        padding: 20px;
-        margin: 10px 0;
-    }
-
-    .custom-site-card {
-        background: white;
-        border: 1px solid #e2e8f0;
-        border-radius: 12px;
-        padding: 18px;
-        margin: 8px 0;
-        box-shadow: 0 2px 8px rgba(0,0,0,0.04);
+        border: 1px solid #86efac; border-radius: 12px; padding: 20px; margin: 10px 0;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -114,38 +82,436 @@ buffer_km = st.sidebar.slider("Buffer Radius (km)", 1, 20, 5)
 
 st.sidebar.markdown("---")
 st.sidebar.title("✏️ Drawing Tools")
-st.sidebar.info(
-    "Use the **drawing tools** on the map to draw points, polygons, "
-    "rectangles, or circles. Elevation statistics will be computed "
-    "automatically for your drawn area."
-)
-point_buffer_m = st.sidebar.slider(
-    "Point buffer radius (m)", 100, 5000, 500,
-    help="When you draw a point, this buffer radius is used to create an analysis area around it."
-)
+st.sidebar.info("Draw on the map to analyze any custom area.")
+point_buffer_m = st.sidebar.slider("Point buffer (m)", 100, 5000, 500)
 
 # ── Earth Engine Processing ──────────────────────────────────────────
 CUTTACK_LAT, CUTTACK_LON = 20.4625, 85.8828
-point = ee.Geometry.Point(CUTTACK_LON, CUTTACK_LAT)
-roi = point.buffer(buffer_km * 1000)
-
+ee_point = ee.Geometry.Point(CUTTACK_LON, CUTTACK_LAT)
+roi = ee_point.buffer(buffer_km * 1000)
 dem = ee.Image('USGS/SRTMGL1_003')
 
-# Compute statistics for default ROI
-with st.spinner("Computing elevation statistics from SRTM DEM..."):
-    stats = dem.reduceRegion(
+
+# ══════════════════════════════════════════════════════════════════════
+# ANALYSIS FUNCTIONS
+# ══════════════════════════════════════════════════════════════════════
+
+@st.cache_data(ttl=600)
+def compute_stats(_geometry_info):
+    """Compute elevation stats for a geometry."""
+    geom = ee.Geometry(json.loads(_geometry_info))
+    s = dem.reduceRegion(
         reducer=ee.Reducer.mean()
             .combine(reducer2=ee.Reducer.minMax(), sharedInputs=True)
             .combine(reducer2=ee.Reducer.stdDev(), sharedInputs=True),
-        geometry=roi,
-        scale=30,
-        maxPixels=1e9
+        geometry=geom, scale=30, maxPixels=1e9
+    ).getInfo()
+    return {
+        'mean': round(s.get('elevation_mean', 0), 2),
+        'min': round(s.get('elevation_min', 0), 2),
+        'max': round(s.get('elevation_max', 0), 2),
+        'std': round(s.get('elevation_stdDev', 0), 2),
+    }
+
+
+@st.cache_data(ttl=600)
+def compute_histogram(_geometry_info, num_bins=50):
+    """Compute elevation histogram using EE fixed histogram reducer."""
+    geom = ee.Geometry(json.loads(_geometry_info))
+    # Get min/max first
+    mm = dem.reduceRegion(
+        reducer=ee.Reducer.minMax(),
+        geometry=geom, scale=30, maxPixels=1e9
+    ).getInfo()
+    lo = mm.get('elevation_min', 0)
+    hi = mm.get('elevation_max', 100)
+    if hi <= lo:
+        hi = lo + 1
+
+    hist = dem.reduceRegion(
+        reducer=ee.Reducer.fixedHistogram(lo, hi, num_bins),
+        geometry=geom, scale=30, maxPixels=1e9
     ).getInfo()
 
-avg_elev = round(stats.get('elevation_mean', 0), 2)
-min_elev = round(stats.get('elevation_min', 0), 2)
-max_elev = round(stats.get('elevation_max', 0), 2)
-std_elev = round(stats.get('elevation_stdDev', 0), 2)
+    buckets = hist.get('elevation', [])
+    bin_edges = [b[0] for b in buckets]
+    counts = [b[1] for b in buckets]
+    return bin_edges, counts, lo, hi
+
+
+@st.cache_data(ttl=600)
+def compute_slope_stats(_geometry_info):
+    """Compute slope statistics."""
+    geom = ee.Geometry(json.loads(_geometry_info))
+    slope = ee.Terrain.slope(dem)
+    s = slope.reduceRegion(
+        reducer=ee.Reducer.mean()
+            .combine(reducer2=ee.Reducer.minMax(), sharedInputs=True)
+            .combine(reducer2=ee.Reducer.stdDev(), sharedInputs=True),
+        geometry=geom, scale=30, maxPixels=1e9
+    ).getInfo()
+    return {
+        'mean': round(s.get('slope_mean', 0), 2),
+        'min': round(s.get('slope_min', 0), 2),
+        'max': round(s.get('slope_max', 0), 2),
+        'std': round(s.get('slope_stdDev', 0), 2),
+    }
+
+
+@st.cache_data(ttl=600)
+def compute_slope_histogram(_geometry_info, num_bins=36):
+    """Compute slope histogram."""
+    geom = ee.Geometry(json.loads(_geometry_info))
+    slope = ee.Terrain.slope(dem)
+
+    hist = slope.reduceRegion(
+        reducer=ee.Reducer.fixedHistogram(0, 90, num_bins),
+        geometry=geom, scale=30, maxPixels=1e9
+    ).getInfo()
+
+    buckets = hist.get('slope', [])
+    bin_edges = [b[0] for b in buckets]
+    counts = [b[1] for b in buckets]
+    return bin_edges, counts
+
+
+@st.cache_data(ttl=600)
+def compute_aspect_histogram(_geometry_info):
+    """Compute aspect histogram (8 cardinal directions)."""
+    geom = ee.Geometry(json.loads(_geometry_info))
+    aspect = ee.Terrain.aspect(dem)
+
+    hist = aspect.reduceRegion(
+        reducer=ee.Reducer.fixedHistogram(0, 360, 8),
+        geometry=geom, scale=30, maxPixels=1e9
+    ).getInfo()
+
+    buckets = hist.get('aspect', [])
+    directions = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW']
+    counts = [b[1] for b in buckets]
+    return directions, counts
+
+
+@st.cache_data(ttl=600)
+def compute_terrain_classes(_geometry_info):
+    """Classify elevation into terrain zones and compute pixel percentages."""
+    geom = ee.Geometry(json.loads(_geometry_info))
+    s = compute_stats(_geometry_info)
+    lo, hi = s['min'], s['max']
+
+    # Create 5 elevation zones
+    rng = hi - lo
+    if rng == 0:
+        return ['Flat'], [100.0], [(lo, hi)]
+
+    thresholds = [
+        lo,
+        lo + rng * 0.2,
+        lo + rng * 0.4,
+        lo + rng * 0.6,
+        lo + rng * 0.8,
+        hi + 0.1
+    ]
+    labels = ['Very Low', 'Low', 'Moderate', 'High', 'Very High']
+    ranges = []
+    percentages = []
+
+    total = 0
+    zone_counts = []
+    for i in range(5):
+        zone = dem.gte(thresholds[i]).And(dem.lt(thresholds[i+1]))
+        cnt = zone.reduceRegion(
+            reducer=ee.Reducer.sum(),
+            geometry=geom, scale=30, maxPixels=1e9
+        ).getInfo().get('elevation', 0)
+        zone_counts.append(cnt)
+        total += cnt
+        ranges.append((round(thresholds[i], 1), round(thresholds[i+1], 1)))
+
+    if total > 0:
+        percentages = [round(c / total * 100, 1) for c in zone_counts]
+    else:
+        percentages = [20.0] * 5
+
+    return labels, percentages, ranges
+
+
+@st.cache_data(ttl=600)
+def compute_hypsometric(_geometry_info, num_bins=50):
+    """Compute hypsometric (cumulative) curve."""
+    bin_edges, counts, lo, hi = compute_histogram(_geometry_info, num_bins)
+    total = sum(counts)
+    if total == 0:
+        return [], []
+
+    cumulative = []
+    running = 0
+    for c in counts:
+        running += c
+        cumulative.append(round((1 - running / total) * 100, 2))
+
+    return bin_edges, cumulative
+
+
+# ══════════════════════════════════════════════════════════════════════
+# CHART GENERATORS
+# ══════════════════════════════════════════════════════════════════════
+
+def create_histogram_chart(bin_edges, counts, title="Elevation Distribution"):
+    fig = go.Figure()
+    fig.add_trace(go.Bar(
+        x=bin_edges, y=counts,
+        marker_color='#006633',
+        marker_line_color='#004d26',
+        marker_line_width=0.5,
+        opacity=0.85,
+        hovertemplate='Elevation: %{x:.1f}m<br>Pixel Count: %{y:,.0f}<extra></extra>'
+    ))
+    fig.update_layout(
+        title=dict(text=title, font=dict(size=16, family='Inter')),
+        xaxis_title='Elevation (m)',
+        yaxis_title='Pixel Count',
+        template='plotly_white',
+        height=380,
+        margin=dict(l=60, r=30, t=50, b=50),
+        font=dict(family='Inter')
+    )
+    return fig
+
+
+def create_slope_chart(bin_edges, counts):
+    fig = go.Figure()
+    fig.add_trace(go.Bar(
+        x=bin_edges, y=counts,
+        marker_color='#8b5cf6',
+        marker_line_color='#6d28d9',
+        marker_line_width=0.5,
+        opacity=0.85,
+        hovertemplate='Slope: %{x:.1f}°<br>Pixel Count: %{y:,.0f}<extra></extra>'
+    ))
+    fig.update_layout(
+        title=dict(text='Slope Distribution', font=dict(size=16, family='Inter')),
+        xaxis_title='Slope (degrees)',
+        yaxis_title='Pixel Count',
+        template='plotly_white',
+        height=380,
+        margin=dict(l=60, r=30, t=50, b=50),
+        font=dict(family='Inter')
+    )
+    return fig
+
+
+def create_aspect_chart(directions, counts):
+    # Repeat first value to close the loop
+    dirs = directions + [directions[0]]
+    vals = counts + [counts[0]]
+    fig = go.Figure()
+    fig.add_trace(go.Scatterpolar(
+        r=vals,
+        theta=dirs,
+        fill='toself',
+        fillcolor='rgba(59, 130, 246, 0.3)',
+        line=dict(color='#3b82f6', width=2),
+        marker=dict(size=6, color='#3b82f6'),
+        hovertemplate='%{theta}: %{r:,.0f} pixels<extra></extra>'
+    ))
+    fig.update_layout(
+        title=dict(text='Aspect (Terrain Orientation)', font=dict(size=16, family='Inter')),
+        polar=dict(
+            radialaxis=dict(visible=True, showticklabels=True),
+            angularaxis=dict(direction='clockwise', rotation=90)
+        ),
+        template='plotly_white',
+        height=400,
+        margin=dict(l=60, r=60, t=50, b=50),
+        font=dict(family='Inter'),
+        showlegend=False
+    )
+    return fig
+
+
+def create_terrain_pie(labels, percentages, ranges):
+    colors = ['#006633', '#4CAF50', '#E5FFCC', '#D8D8D8', '#8B4513']
+    custom_labels = [
+        '%s<br>%.1f–%.1f m' % (l, r[0], r[1])
+        for l, r in zip(labels, ranges)
+    ]
+    fig = go.Figure()
+    fig.add_trace(go.Pie(
+        labels=custom_labels,
+        values=percentages,
+        marker_colors=colors,
+        hole=0.4,
+        textinfo='percent+label',
+        textfont_size=11,
+        hovertemplate='%{label}<br>%{percent}<extra></extra>'
+    ))
+    fig.update_layout(
+        title=dict(text='Terrain Classification', font=dict(size=16, family='Inter')),
+        template='plotly_white',
+        height=400,
+        margin=dict(l=30, r=30, t=50, b=30),
+        font=dict(family='Inter'),
+        showlegend=True,
+        legend=dict(font=dict(size=10))
+    )
+    return fig
+
+
+def create_hypsometric_chart(elevations, cumulative_pct):
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=cumulative_pct, y=elevations,
+        mode='lines',
+        fill='tozerox',
+        fillcolor='rgba(0, 102, 51, 0.15)',
+        line=dict(color='#006633', width=2.5),
+        hovertemplate='Area above: %{x:.1f}%<br>Elevation: %{y:.1f}m<extra></extra>'
+    ))
+    fig.update_layout(
+        title=dict(text='Hypsometric Curve', font=dict(size=16, family='Inter')),
+        xaxis_title='Cumulative Area Above (%)',
+        yaxis_title='Elevation (m)',
+        template='plotly_white',
+        height=380,
+        margin=dict(l=60, r=30, t=50, b=50),
+        font=dict(family='Inter')
+    )
+    return fig
+
+
+def display_full_analysis(geom_info, area_label):
+    """Render all analysis charts and tables for a given geometry."""
+
+    tab1, tab2, tab3, tab4, tab5 = st.tabs([
+        "📊 Elevation Histogram",
+        "⛰️ Slope Analysis",
+        "🧭 Aspect Analysis",
+        "🗺️ Terrain Classification",
+        "📈 Hypsometric Curve"
+    ])
+
+    with tab1:
+        with st.spinner("Computing elevation histogram..."):
+            bin_edges, counts, lo, hi = compute_histogram(geom_info)
+            if len(bin_edges) > 0:
+                fig = create_histogram_chart(bin_edges, counts,
+                    title="Elevation Distribution — %s" % area_label)
+                st.plotly_chart(fig, use_container_width=True)
+                st.caption(
+                    "Distribution of elevation values across %d bins from %.1f m to %.1f m. "
+                    "Total pixels analyzed: %s" % (
+                        len(bin_edges), lo, hi, '{:,.0f}'.format(sum(counts))
+                    )
+                )
+            else:
+                st.warning("Not enough data for histogram.")
+
+    with tab2:
+        with st.spinner("Computing slope analysis..."):
+            slope_stats = compute_slope_stats(geom_info)
+            sc1, sc2, sc3, sc4 = st.columns(4)
+            sc1.metric("📐 Mean Slope", "%.2f°" % slope_stats['mean'])
+            sc2.metric("⬇️ Min Slope", "%.2f°" % slope_stats['min'])
+            sc3.metric("⬆️ Max Slope", "%.2f°" % slope_stats['max'])
+            sc4.metric("📊 Std Dev", "%.2f°" % slope_stats['std'])
+
+            slope_bins, slope_counts = compute_slope_histogram(geom_info)
+            if len(slope_bins) > 0:
+                fig = create_slope_chart(slope_bins, slope_counts)
+                st.plotly_chart(fig, use_container_width=True)
+
+                # Slope classification
+                flat_pct = sum(c for b, c in zip(slope_bins, slope_counts) if b < 5)
+                gentle_pct = sum(c for b, c in zip(slope_bins, slope_counts) if 5 <= b < 15)
+                moderate_pct = sum(c for b, c in zip(slope_bins, slope_counts) if 15 <= b < 30)
+                steep_pct = sum(c for b, c in zip(slope_bins, slope_counts) if b >= 30)
+                total_s = flat_pct + gentle_pct + moderate_pct + steep_pct
+                if total_s > 0:
+                    st.markdown("**Slope Classification:**")
+                    scol1, scol2, scol3, scol4 = st.columns(4)
+                    scol1.metric("Flat (<5°)", "%.1f%%" % (flat_pct / total_s * 100))
+                    scol2.metric("Gentle (5-15°)", "%.1f%%" % (gentle_pct / total_s * 100))
+                    scol3.metric("Moderate (15-30°)", "%.1f%%" % (moderate_pct / total_s * 100))
+                    scol4.metric("Steep (>30°)", "%.1f%%" % (steep_pct / total_s * 100))
+
+    with tab3:
+        with st.spinner("Computing aspect analysis..."):
+            directions, aspect_counts = compute_aspect_histogram(geom_info)
+            if len(aspect_counts) > 0 and sum(aspect_counts) > 0:
+                fig = create_aspect_chart(directions, aspect_counts)
+                st.plotly_chart(fig, use_container_width=True)
+
+                # Find dominant aspect
+                max_idx = aspect_counts.index(max(aspect_counts))
+                total_a = sum(aspect_counts)
+                st.info(
+                    "**Dominant Aspect:** %s (%s-facing slopes) — %.1f%% of the area. "
+                    "This indicates the terrain predominantly faces %s." % (
+                        directions[max_idx],
+                        directions[max_idx],
+                        aspect_counts[max_idx] / total_a * 100,
+                        directions[max_idx]
+                    )
+                )
+
+                # Aspect table
+                aspect_data = []
+                for d, c in zip(directions, aspect_counts):
+                    aspect_data.append({
+                        'Direction': d,
+                        'Pixel Count': int(c),
+                        'Percentage': '%.1f%%' % (c / total_a * 100) if total_a > 0 else '0%',
+                    })
+                st.dataframe(aspect_data, use_container_width=True, hide_index=True)
+            else:
+                st.warning("Not enough data for aspect analysis.")
+
+    with tab4:
+        with st.spinner("Computing terrain classification..."):
+            labels, percentages, ranges = compute_terrain_classes(geom_info)
+            if len(labels) > 1:
+                fig = create_terrain_pie(labels, percentages, ranges)
+                st.plotly_chart(fig, use_container_width=True)
+
+                # Classification table
+                class_data = []
+                for l, p, r in zip(labels, percentages, ranges):
+                    class_data.append({
+                        'Class': l,
+                        'Range': '%.1f – %.1f m' % (r[0], r[1]),
+                        'Percentage': '%.1f%%' % p,
+                    })
+                st.dataframe(class_data, use_container_width=True, hide_index=True)
+            else:
+                st.info("Area is uniformly flat — no classification needed.")
+
+    with tab5:
+        with st.spinner("Computing hypsometric curve..."):
+            elevations, cum_pct = compute_hypsometric(geom_info)
+            if len(elevations) > 0:
+                fig = create_hypsometric_chart(elevations, cum_pct)
+                st.plotly_chart(fig, use_container_width=True)
+                st.caption(
+                    "The hypsometric curve shows the proportion of total area above each "
+                    "elevation. A concave curve indicates a mature/eroded landscape, while "
+                    "a convex curve suggests a youthful/uplifting landscape."
+                )
+            else:
+                st.warning("Not enough data for hypsometric curve.")
+
+
+# ══════════════════════════════════════════════════════════════════════
+# MAIN APP: STATS, MAP, ANALYSIS
+# ══════════════════════════════════════════════════════════════════════
+
+# Compute default stats
+roi_info = json.dumps(roi.getInfo())
+default_stats = compute_stats(roi_info)
+avg_elev = default_stats['mean']
+min_elev = default_stats['min']
+max_elev = default_stats['max']
+std_elev = default_stats['std']
 elev_range = round(max_elev - min_elev, 2)
 
 # ── Display Metrics ──────────────────────────────────────────────────
@@ -158,106 +524,67 @@ col3.metric("⬆️ Max", "%.2f m" % max_elev)
 col4.metric("📐 Std Dev", "%.2f m" % std_elev)
 col5.metric("📏 Range", "%.2f m" % elev_range)
 
+# ── Default Area Analysis ────────────────────────────────────────────
+with st.expander("🔬 **Detailed Analysis — Default Study Area** (click to expand)", expanded=False):
+    display_full_analysis(roi_info, "Default %skm Buffer" % buffer_km)
+
 # ── Build the Map with Drawing Tools ─────────────────────────────────
 vis_params = {
     'min': 0,
     'max': 100,
     'palette': ['006633', 'E5FFCC', '662A00', 'D8D8D8', 'F5F5F5']
 }
-
 dem_map_id = dem.getMapId(vis_params)
-
 hillshade = ee.Terrain.hillshade(dem)
 hillshade_map_id = hillshade.getMapId({'min': 0, 'max': 255})
 
 m = folium.Map(location=[CUTTACK_LAT, CUTTACK_LON], zoom_start=12)
 
-# DEM tile layer
 folium.TileLayer(
     tiles=dem_map_id['tile_fetcher'].url_format,
     attr='Google Earth Engine - SRTM DEM',
-    name='SRTM Elevation',
-    overlay=True,
-    control=True
+    name='SRTM Elevation', overlay=True, control=True
 ).add_to(m)
 
-# Hillshade tile layer
 folium.TileLayer(
     tiles=hillshade_map_id['tile_fetcher'].url_format,
     attr='Google Earth Engine - Hillshade',
-    name='Hillshade (3D Texture)',
-    overlay=True,
-    control=True,
-    opacity=0.3
+    name='Hillshade (3D Texture)', overlay=True, control=True, opacity=0.3
 ).add_to(m)
 
-# Study area boundary
 roi_coords = roi.getInfo()['coordinates'][0]
 boundary_coords = [[c[1], c[0]] for c in roi_coords]
 folium.Polygon(
-    locations=boundary_coords,
-    color='#e63946',
-    weight=3,
-    fill=False,
-    popup='Study Area: %s km buffer' % buffer_km
+    locations=boundary_coords, color='#e63946', weight=3,
+    fill=False, popup='Study Area: %s km buffer' % buffer_km
 ).add_to(m)
 
-# Center marker
 folium.Marker(
     location=[CUTTACK_LAT, CUTTACK_LON],
-    popup='Cuttack City Center',
-    tooltip='Cuttack City Center',
+    popup='Cuttack City Center', tooltip='Cuttack City Center',
     icon=folium.Icon(color='red', icon='info-sign')
 ).add_to(m)
 
-# ── Add Drawing Tools ────────────────────────────────────────────────
+# Drawing tools
 draw = plugins.Draw(
-    export=True,
-    position='topleft',
+    export=True, position='topleft',
     draw_options={
         'polyline': False,
-        'polygon': {
-            'allowIntersection': False,
-            'shapeOptions': {
-                'color': '#3b82f6',
-                'weight': 3,
-                'fillOpacity': 0.2
-            }
-        },
-        'rectangle': {
-            'shapeOptions': {
-                'color': '#8b5cf6',
-                'weight': 3,
-                'fillOpacity': 0.2
-            }
-        },
-        'circle': {
-            'shapeOptions': {
-                'color': '#f59e0b',
-                'weight': 3,
-                'fillOpacity': 0.2
-            }
-        },
-        'marker': True,
-        'circlemarker': False,
+        'polygon': {'allowIntersection': False, 'shapeOptions': {'color': '#3b82f6', 'weight': 3, 'fillOpacity': 0.2}},
+        'rectangle': {'shapeOptions': {'color': '#8b5cf6', 'weight': 3, 'fillOpacity': 0.2}},
+        'circle': {'shapeOptions': {'color': '#f59e0b', 'weight': 3, 'fillOpacity': 0.2}},
+        'marker': True, 'circlemarker': False,
     },
-    edit_options={
-        'edit': True,
-        'remove': True,
-    }
+    edit_options={'edit': True, 'remove': True}
 )
 draw.add_to(m)
-
 folium.LayerControl().add_to(m)
 
 st.markdown("### 🗺️ Interactive Map — Draw to Analyze")
 st.markdown(
-    "**Study Area:** %s km buffer around Cuttack (20.46°N, 85.88°E) &nbsp;|&nbsp; "
-    "✏️ **Use the toolbar on the left of the map** to draw points, polygons, rectangles, or circles "
-    "and get instant elevation analysis." % buffer_km
+    "✏️ **Use the toolbar** on the left of the map to draw shapes. "
+    "Elevation analysis runs automatically for each drawn area."
 )
-
-# Render map and capture drawn data
 map_data = st_folium(m, width=None, height=600, use_container_width=True)
 
 
@@ -265,68 +592,37 @@ map_data = st_folium(m, width=None, height=600, use_container_width=True)
 # DRAWN FEATURE ANALYSIS
 # ══════════════════════════════════════════════════════════════════════
 
-def compute_drawn_stats(geometry):
-    """Compute elevation statistics for a drawn EE geometry."""
-    drawn_stats = dem.reduceRegion(
-        reducer=ee.Reducer.mean()
-            .combine(reducer2=ee.Reducer.minMax(), sharedInputs=True)
-            .combine(reducer2=ee.Reducer.stdDev(), sharedInputs=True),
-        geometry=geometry,
-        scale=30,
-        maxPixels=1e9
-    ).getInfo()
-    return {
-        'mean': round(drawn_stats.get('elevation_mean', 0), 2),
-        'min': round(drawn_stats.get('elevation_min', 0), 2),
-        'max': round(drawn_stats.get('elevation_max', 0), 2),
-        'std': round(drawn_stats.get('elevation_stdDev', 0), 2),
-    }
-
-
 def geojson_to_ee_geometry(feature):
-    """Convert a GeoJSON feature to an Earth Engine geometry."""
     geom = feature.get('geometry', feature)
     geom_type = geom.get('type', '')
     coords = geom.get('coordinates', [])
-
     if geom_type == 'Point':
         return ee.Geometry.Point(coords).buffer(point_buffer_m)
     elif geom_type == 'Polygon':
         return ee.Geometry.Polygon(coords)
     elif geom_type == 'LineString':
         return ee.Geometry.LineString(coords).buffer(100)
-    else:
-        return None
+    return None
 
 
 def get_feature_label(feature, index):
-    """Generate a human-readable label for a drawn feature."""
     geom = feature.get('geometry', feature)
     geom_type = geom.get('type', '')
     coords = geom.get('coordinates', [])
-
     if geom_type == 'Point':
-        return "📍 Point %d (%.4f°N, %.4f°E) — %dm buffer" % (
-            index, coords[1], coords[0], point_buffer_m
-        )
+        return "Point %d (%.4f N, %.4f E) - %dm buffer" % (index, coords[1], coords[0], point_buffer_m)
     elif geom_type == 'Polygon':
-        n_vertices = len(coords[0]) - 1 if coords else 0
-        return "🔷 Polygon %d (%d vertices)" % (index, n_vertices)
-    else:
-        return "📐 Shape %d (%s)" % (index, geom_type)
+        n = len(coords[0]) - 1 if coords else 0
+        return "Polygon %d (%d vertices)" % (index, n)
+    return "Shape %d (%s)" % (index, geom_type)
 
 
-# Check if any features were drawn
 all_drawings = map_data.get('all_drawings', []) if map_data else []
-last_drawing = map_data.get('last_active_drawing') if map_data else None
-
-# Store drawn features in session state
 if 'drawn_features' not in st.session_state:
     st.session_state.drawn_features = []
-if 'drawn_stats' not in st.session_state:
-    st.session_state.drawn_stats = []
+if 'drawn_results' not in st.session_state:
+    st.session_state.drawn_results = []
 
-# Update drawn features from map
 if all_drawings and len(all_drawings) > 0:
     st.session_state.drawn_features = all_drawings
 
@@ -334,75 +630,77 @@ st.markdown("---")
 st.markdown("### ✏️ Custom Site Analysis")
 
 if len(st.session_state.drawn_features) > 0:
-    st.success("**%d feature(s) drawn** — Computing elevation statistics..." % len(st.session_state.drawn_features))
+    st.success("**%d feature(s) drawn** — Analyzing..." % len(st.session_state.drawn_features))
 
-    # Process each drawn feature
-    new_stats = []
+    results = []
     for idx, feature in enumerate(st.session_state.drawn_features, 1):
         ee_geom = geojson_to_ee_geometry(feature)
         if ee_geom:
             try:
-                feature_stats = compute_drawn_stats(ee_geom)
+                geom_info = json.dumps(ee_geom.getInfo())
+                feature_stats = compute_stats(geom_info)
                 label = get_feature_label(feature, idx)
-                new_stats.append({
+                results.append({
                     'label': label,
                     'stats': feature_stats,
-                    'feature': feature,
+                    'geom_info': geom_info,
                     'index': idx
                 })
             except Exception as e:
-                st.warning("Could not compute stats for feature %d: %s" % (idx, str(e)))
+                st.warning("Could not analyze feature %d: %s" % (idx, str(e)))
 
-    st.session_state.drawn_stats = new_stats
+    st.session_state.drawn_results = results
 
-    # Display stats for each drawn feature
-    for item in st.session_state.drawn_stats:
+    for item in st.session_state.drawn_results:
         s = item['stats']
-        with st.container():
-            st.markdown(
-                '<div class="custom-site-card">',
-                unsafe_allow_html=True
-            )
-            st.markdown("#### %s" % item['label'])
-            c1, c2, c3, c4 = st.columns(4)
-            c1.metric("📊 Mean", "%.2f m" % s['mean'])
-            c2.metric("⬇️ Min", "%.2f m" % s['min'])
-            c3.metric("⬆️ Max", "%.2f m" % s['max'])
-            c4.metric("📐 Std Dev", "%.2f m" % s['std'])
-            st.markdown('</div>', unsafe_allow_html=True)
+        st.markdown("#### 📍 %s" % item['label'])
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("📊 Mean", "%.2f m" % s['mean'])
+        c2.metric("⬇️ Min", "%.2f m" % s['min'])
+        c3.metric("⬆️ Max", "%.2f m" % s['max'])
+        c4.metric("📐 Std Dev", "%.2f m" % s['std'])
+
+        with st.expander("🔬 **Detailed Analysis — %s**" % item['label'], expanded=False):
+            display_full_analysis(item['geom_info'], item['label'])
 
     # Comparison table
-    if len(st.session_state.drawn_stats) > 1:
-        st.markdown("#### 📋 Comparison Table")
+    if len(st.session_state.drawn_results) > 1:
+        st.markdown("#### 📋 Multi-Site Comparison")
         table_data = []
-        for item in st.session_state.drawn_stats:
+        for item in st.session_state.drawn_results:
             s = item['stats']
             table_data.append({
                 'Site': item['label'],
-                'Mean (m)': s['mean'],
-                'Min (m)': s['min'],
-                'Max (m)': s['max'],
-                'Std Dev (m)': s['std'],
+                'Mean (m)': s['mean'], 'Min (m)': s['min'],
+                'Max (m)': s['max'], 'Std Dev (m)': s['std'],
                 'Range (m)': round(s['max'] - s['min'], 2)
             })
         st.dataframe(table_data, use_container_width=True, hide_index=True)
 
+        # Grouped bar chart
+        fig = go.Figure()
+        names = [d['Site'][:20] for d in table_data]
+        fig.add_trace(go.Bar(name='Mean', x=names, y=[d['Mean (m)'] for d in table_data], marker_color='#006633'))
+        fig.add_trace(go.Bar(name='Min', x=names, y=[d['Min (m)'] for d in table_data], marker_color='#93c5fd'))
+        fig.add_trace(go.Bar(name='Max', x=names, y=[d['Max (m)'] for d in table_data], marker_color='#ef4444'))
+        fig.update_layout(
+            title='Multi-Site Elevation Comparison',
+            barmode='group', template='plotly_white', height=400,
+            font=dict(family='Inter')
+        )
+        st.plotly_chart(fig, use_container_width=True)
 else:
     st.markdown(
         '<div class="draw-info-box">'
         '<h4 style="margin:0 0 8px 0; color:#166534;">✏️ Draw on the map to analyze any area</h4>'
         '<p style="margin:0; color:#15803d;">'
-        'Use the <strong>drawing toolbar</strong> on the left side of the map to:'
+        '<strong>📍 Marker</strong> — Point with %dm buffer &nbsp;|&nbsp; '
+        '<strong>🔷 Polygon</strong> — Custom shape &nbsp;|&nbsp; '
+        '<strong>⬜ Rectangle</strong> — Box area &nbsp;|&nbsp; '
+        '<strong>⭕ Circle</strong> — Circular area'
         '</p>'
-        '<ul style="color:#15803d; margin:8px 0;">'
-        '<li><strong>📍 Marker</strong> — Click to place a point (analyzed with %dm buffer)</li>'
-        '<li><strong>🔷 Polygon</strong> — Click vertices to draw a custom shape</li>'
-        '<li><strong>⬜ Rectangle</strong> — Click and drag to draw a box</li>'
-        '<li><strong>⭕ Circle</strong> — Click and drag to draw a circle</li>'
-        '</ul>'
-        '<p style="margin:0; color:#15803d;">'
-        'Elevation statistics will be computed instantly for your drawn area!'
-        '</p>'
+        '<p style="margin:6px 0 0; color:#15803d;">Each drawn area gets: '
+        '<strong>histogram, slope, aspect, terrain classes, and hypsometric curve!</strong></p>'
         '</div>' % point_buffer_m,
         unsafe_allow_html=True
     )
@@ -410,8 +708,6 @@ else:
 # ── Manual Coordinate Input ──────────────────────────────────────────
 st.markdown("---")
 st.markdown("### 📍 Analyze by Coordinates")
-st.caption("Enter latitude and longitude manually to analyze a specific point.")
-
 coord_col1, coord_col2, coord_col3 = st.columns([2, 2, 1])
 with coord_col1:
     manual_lat = st.number_input("Latitude", value=20.4625, format="%.4f", step=0.01)
@@ -421,37 +717,19 @@ with coord_col3:
     manual_buffer = st.number_input("Buffer (m)", value=500, min_value=100, max_value=10000, step=100)
 
 if st.button("🔍 Analyze This Location", type="primary"):
-    with st.spinner("Computing elevation for (%.4f, %.4f)..." % (manual_lat, manual_lon)):
-        manual_geom = ee.Geometry.Point(manual_lon, manual_lat).buffer(manual_buffer)
-        manual_stats = compute_drawn_stats(manual_geom)
+    manual_geom = ee.Geometry.Point(manual_lon, manual_lat).buffer(manual_buffer)
+    manual_geom_info = json.dumps(manual_geom.getInfo())
 
+    with st.spinner("Computing analysis for (%.4f, %.4f)..." % (manual_lat, manual_lon)):
+        ms = compute_stats(manual_geom_info)
         st.markdown("#### 📍 Results for (%.4f°N, %.4f°E) — %dm buffer" % (manual_lat, manual_lon, manual_buffer))
         mc1, mc2, mc3, mc4 = st.columns(4)
-        mc1.metric("📊 Mean", "%.2f m" % manual_stats['mean'])
-        mc2.metric("⬇️ Min", "%.2f m" % manual_stats['min'])
-        mc3.metric("⬆️ Max", "%.2f m" % manual_stats['max'])
-        mc4.metric("📐 Std Dev", "%.2f m" % manual_stats['std'])
+        mc1.metric("📊 Mean", "%.2f m" % ms['mean'])
+        mc2.metric("⬇️ Min", "%.2f m" % ms['min'])
+        mc3.metric("⬆️ Max", "%.2f m" % ms['max'])
+        mc4.metric("📐 Std Dev", "%.2f m" % ms['std'])
 
-        # Quick interpretation
-        avg_m = manual_stats['mean']
-        if avg_m < 10:
-            terrain = "very low-lying coastal/floodplain"
-        elif avg_m < 50:
-            terrain = "low-elevation alluvial plain"
-        elif avg_m < 200:
-            terrain = "moderately elevated terrain"
-        elif avg_m < 500:
-            terrain = "elevated/hilly terrain"
-        else:
-            terrain = "high-altitude mountainous terrain"
-
-        st.info(
-            "**Quick Interpretation:** This location has a mean elevation of **%.2f m**, "
-            "classified as **%s**. Elevation ranges from **%.2f m** to **%.2f m** "
-            "within the %dm analysis buffer." % (
-                avg_m, terrain, manual_stats['min'], manual_stats['max'], manual_buffer
-            )
-        )
+        display_full_analysis(manual_geom_info, "Manual Point (%.4f, %.4f)" % (manual_lat, manual_lon))
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -459,14 +737,9 @@ if st.button("🔍 Analyze This Location", type="primary"):
 # ══════════════════════════════════════════════════════════════════════
 
 def get_dem_thumbnail(dem_image, region, vis):
-    """Download a static thumbnail PNG from Earth Engine."""
     thumb_url = dem_image.getThumbURL({
-        'min': vis['min'],
-        'max': vis['max'],
-        'palette': vis['palette'],
-        'region': region,
-        'dimensions': 800,
-        'format': 'png'
+        'min': vis['min'], 'max': vis['max'], 'palette': vis['palette'],
+        'region': region, 'dimensions': 800, 'format': 'png'
     })
     tmp = tempfile.NamedTemporaryFile(suffix='.png', delete=False)
     urllib.request.urlretrieve(thumb_url, tmp.name)
@@ -474,81 +747,39 @@ def get_dem_thumbnail(dem_image, region, vis):
 
 
 def get_interpretation(avg, min_e, max_e, std, e_range, buf_km):
-    """Generate professional interpretation of the elevation data."""
     lines = []
-
     lines.append("TERRAIN CLASSIFICATION:")
     if avg < 50:
-        lines.append(
-            "The study area around Cuttack falls within a low-lying alluvial "
-            "plain, characteristic of the Mahanadi River delta region. With a "
-            "mean elevation of %.2f m above sea level, the terrain is "
-            "predominantly flat." % avg
-        )
+        lines.append("The study area falls within a low-lying alluvial plain with a mean elevation of %.2f m." % avg)
     elif avg < 200:
-        lines.append(
-            "The study area exhibits moderate elevation with a mean of "
-            "%.2f m, indicating gently undulating terrain." % avg
-        )
+        lines.append("The study area exhibits moderate elevation (mean: %.2f m), indicating gently undulating terrain." % avg)
     else:
-        lines.append(
-            "The study area shows high elevation with a mean of "
-            "%.2f m, indicating hilly or mountainous terrain." % avg
-        )
-
+        lines.append("The study area shows high elevation (mean: %.2f m), indicating hilly/mountainous terrain." % avg)
     lines.append("")
     lines.append("ELEVATION VARIABILITY:")
     lines.append(
-        "The elevation range of %.2f m (from %.2f m to %.2f m) with a "
-        "standard deviation of %.2f m indicates %s topographic variability "
-        "within the %s km buffer zone." % (
+        "Elevation range: %.2f m (%.2f m to %.2f m), Std Dev: %.2f m — %s variability within %s km zone." % (
             e_range, min_e, max_e, std,
             "low" if std < 10 else ("moderate" if std < 30 else "high"),
             buf_km
-        )
-    )
-
-    if min_e < 0:
-        lines.append("")
-        lines.append("FLOOD RISK ASSESSMENT:")
-        lines.append(
-            "IMPORTANT: The minimum elevation of %.2f m (below sea level) "
-            "suggests the presence of low-lying areas that are potentially "
-            "susceptible to flooding, waterlogging, or tidal influence." % min_e
-        )
-
+        ))
     lines.append("")
     lines.append("GEOMORPHOLOGICAL CONTEXT:")
     lines.append(
-        "Cuttack is situated at the apex of the Mahanadi Delta, between the "
-        "Mahanadi and Kathajodi rivers. The observed elevation pattern is "
-        "consistent with the deltaic floodplain geomorphology, where natural "
-        "levees along rivers create slightly elevated ridges while inter-"
-        "distributary areas remain low-lying."
+        "Cuttack sits at the apex of the Mahanadi Delta. The elevation pattern is consistent with "
+        "deltaic floodplain geomorphology."
     )
-
     lines.append("")
     lines.append("PLANNING IMPLICATIONS:")
-    lines.append(
-        "1. Areas below %.2f m (mean elevation) should be prioritized for "
-        "flood mitigation infrastructure." % avg
-    )
-    lines.append(
-        "2. The relatively flat terrain (std dev: %.2f m) is favorable for "
-        "transportation and road network development." % std
-    )
-    lines.append(
-        "3. Drainage planning should account for the minimal elevation "
-        "gradient across the study area."
-    )
+    lines.append("1. Areas below %.2f m should be prioritized for flood mitigation." % avg)
+    lines.append("2. Flat terrain (std: %.2f m) is favorable for road networks." % std)
+    lines.append("3. Drainage should account for minimal elevation gradient.")
     return lines
 
 
 class ReportPDF(FPDF):
-    """Custom PDF with professional headers and footers."""
     def header(self):
-        if self.page_no() == 1:
-            return
+        if self.page_no() == 1: return
         self.set_fill_color(0, 102, 51)
         self.rect(0, 0, 210, 15, 'F')
         self.set_text_color(255, 255, 255)
@@ -562,13 +793,10 @@ class ReportPDF(FPDF):
         self.set_y(-15)
         self.set_font("Arial", 'I', 8)
         self.set_text_color(150, 150, 150)
-        self.cell(0, 10,
-                  "Generated via Google Earth Engine | Project: ee-innovativegeographer | Page %s" % self.page_no(),
-                  align='C')
+        self.cell(0, 10, "Google Earth Engine | ee-innovativegeographer | Page %s" % self.page_no(), align='C')
 
 
 def section_heading(pdf, num, title):
-    """Print a green section heading with underline."""
     pdf.set_font("Arial", 'B', 13)
     pdf.set_text_color(0, 102, 51)
     pdf.cell(0, 10, txt="%s. %s" % (num, title), ln=True)
@@ -578,16 +806,18 @@ def section_heading(pdf, num, title):
     pdf.ln(3)
 
 
-def create_pdf(title, creator, avg, min_e, max_e, std, buf_km, map_img_path, drawn_stats_list=None):
+def create_pdf(title, creator, avg, min_e, max_e, std, buf_km, map_img_path,
+               drawn_stats_list=None, slope_data=None, aspect_data=None, terrain_data=None):
     pdf = ReportPDF()
     pdf.set_auto_page_break(auto=True, margin=20)
+    sec = [0]  # mutable counter
 
-    # ═══════════════════════════════════════════════════════════════
+    def next_sec():
+        sec[0] += 1
+        return sec[0]
+
     # PAGE 1: COVER
-    # ═══════════════════════════════════════════════════════════════
     pdf.add_page()
-
-    # Green header bar
     pdf.set_fill_color(0, 102, 51)
     pdf.rect(0, 0, 210, 35, 'F')
     pdf.set_text_color(255, 255, 255)
@@ -599,214 +829,137 @@ def create_pdf(title, creator, avg, min_e, max_e, std, buf_km, map_img_path, dra
     pdf.set_text_color(0, 0, 0)
     pdf.ln(8)
 
-    # Report metadata table
     pdf.set_fill_color(240, 240, 240)
     pdf.set_draw_color(200, 200, 200)
-    x = 15
-    meta_rows = [
-        ("Report Title:", title),
-        ("Prepared By:", creator),
-        ("Date Generated:", datetime.now().strftime('%B %d, %Y at %H:%M')),
+    for label, val in [
+        ("Report Title:", title), ("Prepared By:", creator),
+        ("Date:", datetime.now().strftime('%B %d, %Y at %H:%M')),
         ("GEE Project:", "ee-innovativegeographer"),
-        ("Coordinate System:", "WGS 84 (EPSG:4326)"),
-    ]
-    for label, val in meta_rows:
-        pdf.set_x(x)
+        ("CRS:", "WGS 84 (EPSG:4326)")
+    ]:
+        pdf.set_x(15)
         pdf.set_font("Arial", 'B', 10)
         pdf.cell(85, 8, "  %s" % label, border=1, fill=True)
         pdf.set_font("Arial", size=10)
         pdf.cell(95, 8, "  %s" % val, border=1, fill=True, ln=True)
-
     pdf.ln(6)
 
-    # Map image
-    pdf.set_font("Arial", 'B', 13)
-    pdf.set_text_color(0, 102, 51)
-    pdf.cell(0, 10, txt="STUDY AREA MAP", ln=True)
-    pdf.set_text_color(0, 0, 0)
-
     if map_img_path and os.path.exists(map_img_path):
-        img_w = 170
-        img_x = (210 - img_w) / 2
-        pdf.image(map_img_path, x=img_x, w=img_w)
+        pdf.set_font("Arial", 'B', 13)
+        pdf.set_text_color(0, 102, 51)
+        pdf.cell(0, 10, txt="STUDY AREA MAP", ln=True)
+        pdf.set_text_color(0, 0, 0)
+        pdf.image(map_img_path, x=20, w=170)
         pdf.ln(3)
         pdf.set_font("Arial", 'I', 9)
         pdf.set_text_color(100, 100, 100)
-        pdf.cell(0, 6,
-                 txt="Figure 1: SRTM DEM for %s km buffer around Cuttack (20.4625N, 85.8828E)" % buf_km,
-                 ln=True, align='C')
+        pdf.cell(0, 6, txt="Figure 1: SRTM DEM — %s km buffer around Cuttack" % buf_km, ln=True, align='C')
         pdf.set_text_color(0, 0, 0)
 
-    # Color legend
-    pdf.ln(2)
-    pdf.set_font("Arial", 'B', 9)
-    pdf.cell(0, 6,
-             txt="Legend: Green = Low Elev. | Cream = Moderate | Brown = High | White = Highest",
-             ln=True, align='C')
-
-    # ═══════════════════════════════════════════════════════════════
-    # PAGE 2: Map Metadata, Data Source, Methodology
-    # ═══════════════════════════════════════════════════════════════
+    # PAGE 2: STATISTICS
     pdf.add_page()
-
-    section_heading(pdf, 1, "LOCATION DETAILS")
-    pdf.set_font("Arial", size=11)
-    pdf.cell(0, 7, txt="City: Cuttack, Odisha, India", ln=True)
-    pdf.cell(0, 7, txt="Center Coordinates: 20.4625 N, 85.8828 E", ln=True)
-    pdf.cell(0, 7, txt="Study Area Buffer: %s km radius" % buf_km, ln=True)
-    pdf.cell(0, 7, txt="Approximate Area: %.1f sq km" % (3.14159 * buf_km * buf_km), ln=True)
-    pdf.cell(0, 7, txt="Region: Mahanadi River Delta, Eastern India", ln=True)
-    pdf.ln(4)
-
-    section_heading(pdf, 2, "MAP METADATA")
-    pdf.set_font("Arial", size=11)
-    pdf.set_fill_color(240, 240, 240)
-    pdf.set_draw_color(200, 200, 200)
-    map_meta = [
-        ("Dataset ID", "USGS/SRTMGL1_003"),
-        ("Dataset Name", "NASA SRTM Global 1 arc-second"),
-        ("Data Type", "Raster (Digital Elevation Model)"),
-        ("Band Used", "elevation"),
-        ("Spatial Resolution", "1 arc-second (~30 meters)"),
-        ("Vertical Datum", "EGM96 Geoid"),
-        ("Horizontal Datum", "WGS 84"),
-        ("Vertical Accuracy", "< 16 m (absolute), < 10 m (relative)"),
-        ("Acquisition Period", "February 11-22, 2000"),
-        ("Coverage", "60N to 56S latitude"),
-        ("Provider", "NASA / USGS"),
-        ("Visualization Min", "0 m"),
-        ("Visualization Max", "100 m"),
-        ("Color Palette", "Green-Cream-Brown-Grey-White"),
-    ]
-    for i, (k, v) in enumerate(map_meta):
-        bg = (245, 245, 245) if i % 2 == 0 else (255, 255, 255)
-        pdf.set_fill_color(*bg)
-        pdf.set_font("Arial", 'B', 10)
-        pdf.cell(75, 7, "  %s" % k, border=1, fill=True)
-        pdf.set_font("Arial", size=10)
-        pdf.cell(105, 7, "  %s" % v, border=1, fill=True, ln=True)
-    pdf.ln(4)
-
-    section_heading(pdf, 3, "METHODOLOGY")
-    pdf.set_font("Arial", size=10)
-    method_steps = [
-        "Step 1: Study Area Definition",
-        "A circular buffer of %s km radius was created around the center point "
-        "of Cuttack (20.4625N, 85.8828E) using ee.Geometry.Point().buffer(). "
-        "This defines the Region of Interest (ROI) for all subsequent analysis." % buf_km,
-        "",
-        "Step 2: DEM Data Acquisition",
-        "The NASA SRTM Global 1 arc-second DEM (USGS/SRTMGL1_003) was loaded "
-        "from the Google Earth Engine data catalog.",
-        "",
-        "Step 3: Statistical Analysis",
-        "Zonal statistics were computed using ee.Image.reduceRegion() with "
-        "combined reducers (mean, min, max, stdDev) over the ROI at 30m resolution.",
-        "",
-        "Step 4: Interactive Drawing Analysis",
-        "Users can draw custom polygons, rectangles, circles, or place points "
-        "on the interactive map. Elevation statistics are computed on-the-fly "
-        "for each drawn feature using the same SRTM DEM dataset.",
-        "",
-        "Step 5: Report Generation",
-        "Statistics, map thumbnail, and interpretation were compiled into "
-        "this PDF report using FPDF integrated with the Streamlit application.",
-    ]
-    for line in method_steps:
-        if line == "":
-            pdf.ln(2)
-        elif line.startswith("Step"):
-            pdf.set_font("Arial", 'B', 10)
-            pdf.cell(0, 7, txt=line, ln=True)
-            pdf.set_font("Arial", size=10)
-        else:
-            pdf.multi_cell(0, 5, txt=line)
-
-    # ═══════════════════════════════════════════════════════════════
-    # PAGE 3: Statistics & Interpretation
-    # ═══════════════════════════════════════════════════════════════
-    pdf.add_page()
-
-    section_heading(pdf, 4, "ELEVATION STATISTICS — DEFAULT STUDY AREA")
+    section_heading(pdf, next_sec(), "ELEVATION STATISTICS")
 
     pdf.set_font("Arial", 'B', 11)
     pdf.set_fill_color(0, 102, 51)
     pdf.set_text_color(255, 255, 255)
-    col_w = [15, 85, 45, 45]
-    headers = ["#", "Statistic", "Value", "Unit"]
-    for i, h in enumerate(headers):
-        pdf.cell(col_w[i], 10, h, border=1, fill=True, align='C')
+    cw = [15, 85, 45, 45]
+    for i, h in enumerate(["#", "Statistic", "Value", "Unit"]):
+        pdf.cell(cw[i], 10, h, border=1, fill=True, align='C')
     pdf.ln()
-
     pdf.set_text_color(0, 0, 0)
     pdf.set_font("Arial", size=11)
-    rows = [
-        ("1", "Mean Elevation", "%.2f" % avg, "meters"),
-        ("2", "Minimum Elevation", "%.2f" % min_e, "meters"),
-        ("3", "Maximum Elevation", "%.2f" % max_e, "meters"),
-        ("4", "Standard Deviation", "%.2f" % std, "meters"),
-        ("5", "Elevation Range", "%.2f" % (max_e - min_e), "meters"),
-        ("6", "Study Area", "%.1f" % (3.14159 * buf_km * buf_km), "sq km"),
+    for i, (n, l, v, u) in enumerate([
+        ("1", "Mean Elevation", "%.2f" % avg, "m"),
+        ("2", "Minimum Elevation", "%.2f" % min_e, "m"),
+        ("3", "Maximum Elevation", "%.2f" % max_e, "m"),
+        ("4", "Standard Deviation", "%.2f" % std, "m"),
+        ("5", "Elevation Range", "%.2f" % (max_e - min_e), "m"),
+        ("6", "Study Area", "%.1f" % (3.14159 * buf_km ** 2), "sq km"),
         ("7", "Buffer Radius", "%s" % buf_km, "km"),
-        ("8", "Analysis Scale", "30", "meters"),
-    ]
-    for i, (num, label, val, unit) in enumerate(rows):
+        ("8", "Analysis Scale", "30", "m"),
+    ]):
         bg = (245, 245, 245) if i % 2 == 0 else (255, 255, 255)
         pdf.set_fill_color(*bg)
-        pdf.cell(col_w[0], 9, num, border=1, fill=True, align='C')
-        pdf.cell(col_w[1], 9, "  %s" % label, border=1, fill=True)
-        pdf.cell(col_w[2], 9, val, border=1, fill=True, align='C')
-        pdf.cell(col_w[3], 9, unit, border=1, fill=True, align='C')
+        pdf.cell(cw[0], 9, n, border=1, fill=True, align='C')
+        pdf.cell(cw[1], 9, "  %s" % l, border=1, fill=True)
+        pdf.cell(cw[2], 9, v, border=1, fill=True, align='C')
+        pdf.cell(cw[3], 9, u, border=1, fill=True, align='C')
         pdf.ln()
+    pdf.ln(4)
 
-    pdf.ln(6)
-
-    # ── Drawn Features Stats in PDF ──────────────────────────────
-    if drawn_stats_list and len(drawn_stats_list) > 0:
-        section_heading(pdf, 5, "CUSTOM DRAWN SITE ANALYSIS")
+    # Slope stats in PDF
+    if slope_data:
+        section_heading(pdf, next_sec(), "SLOPE ANALYSIS")
         pdf.set_font("Arial", size=10)
-        pdf.multi_cell(0, 5,
-            txt="The following elevation statistics were computed for user-drawn "
-                "features on the interactive map."
-        )
-        pdf.ln(3)
+        for k, v in [
+            ("Mean Slope", "%.2f deg" % slope_data['mean']),
+            ("Min Slope", "%.2f deg" % slope_data['min']),
+            ("Max Slope", "%.2f deg" % slope_data['max']),
+            ("Std Dev", "%.2f deg" % slope_data['std']),
+        ]:
+            pdf.set_font("Arial", 'B', 10)
+            pdf.cell(60, 7, "  %s" % k, border=1, fill=True)
+            pdf.set_font("Arial", size=10)
+            pdf.cell(50, 7, "  %s" % v, border=1, ln=True)
+        pdf.ln(4)
 
+    # Aspect data in PDF
+    if aspect_data:
+        section_heading(pdf, next_sec(), "ASPECT ANALYSIS")
+        pdf.set_font("Arial", size=10)
+        dirs, counts = aspect_data
+        total_a = sum(counts)
+        for d, c in zip(dirs, counts):
+            pct = (c / total_a * 100) if total_a > 0 else 0
+            pdf.set_font("Arial", 'B', 10)
+            pdf.cell(30, 7, "  %s" % d, border=1, fill=True)
+            pdf.set_font("Arial", size=10)
+            pdf.cell(40, 7, "  %s pixels" % int(c), border=1)
+            pdf.cell(30, 7, "  %.1f%%" % pct, border=1, ln=True)
+        pdf.ln(4)
+
+    # Terrain classification in PDF
+    if terrain_data:
+        section_heading(pdf, next_sec(), "TERRAIN CLASSIFICATION")
+        labels_t, pcts_t, ranges_t = terrain_data
+        pdf.set_font("Arial", size=10)
+        for l, p, r in zip(labels_t, pcts_t, ranges_t):
+            pdf.set_font("Arial", 'B', 10)
+            pdf.cell(40, 7, "  %s" % l, border=1, fill=True)
+            pdf.set_font("Arial", size=10)
+            pdf.cell(50, 7, "  %.1f - %.1f m" % (r[0], r[1]), border=1)
+            pdf.cell(30, 7, "  %.1f%%" % p, border=1, ln=True)
+        pdf.ln(4)
+
+    # Drawn features
+    if drawn_stats_list and len(drawn_stats_list) > 0:
+        section_heading(pdf, next_sec(), "CUSTOM DRAWN SITE ANALYSIS")
+        pdf.set_font("Arial", size=10)
+        pdf.multi_cell(0, 5, txt="Statistics for user-drawn features on the interactive map:")
+        pdf.ln(3)
         for item in drawn_stats_list:
             s = item['stats']
-            # Site heading
             pdf.set_font("Arial", 'B', 11)
             pdf.set_text_color(0, 102, 51)
             pdf.cell(0, 8, txt=item['label'], ln=True)
             pdf.set_text_color(0, 0, 0)
-            pdf.set_font("Arial", size=10)
-
-            # Mini stats table
             pdf.set_fill_color(245, 245, 245)
-            pdf.set_draw_color(200, 200, 200)
-            mini_rows = [
-                ("Mean Elevation", "%.2f m" % s['mean']),
-                ("Min Elevation", "%.2f m" % s['min']),
-                ("Max Elevation", "%.2f m" % s['max']),
-                ("Std Dev", "%.2f m" % s['std']),
+            for mk, mv in [
+                ("Mean", "%.2f m" % s['mean']), ("Min", "%.2f m" % s['min']),
+                ("Max", "%.2f m" % s['max']), ("Std Dev", "%.2f m" % s['std']),
                 ("Range", "%.2f m" % (s['max'] - s['min'])),
-            ]
-            for mk, mv in mini_rows:
+            ]:
                 pdf.set_font("Arial", 'B', 9)
                 pdf.cell(60, 7, "  %s" % mk, border=1, fill=True)
                 pdf.set_font("Arial", size=9)
                 pdf.cell(40, 7, "  %s" % mv, border=1, ln=True)
             pdf.ln(4)
 
-        next_section = 6
-    else:
-        next_section = 5
-
-    # Section: Interpretation
-    section_heading(pdf, next_section, "INTERPRETATION & ANALYSIS")
+    # Interpretation
+    section_heading(pdf, next_sec(), "INTERPRETATION & ANALYSIS")
     pdf.set_font("Arial", size=10)
-
-    interp_lines = get_interpretation(avg, min_e, max_e, std, max_e - min_e, buf_km)
-    for line in interp_lines:
+    for line in get_interpretation(avg, min_e, max_e, std, max_e - min_e, buf_km):
         if line == "":
             pdf.ln(2)
         elif line.endswith(":"):
@@ -824,10 +977,8 @@ def create_pdf(title, creator, avg, min_e, max_e, std, buf_km, map_img_path, dra
     pdf.set_font("Arial", 'I', 8)
     pdf.set_text_color(120, 120, 120)
     pdf.multi_cell(0, 4,
-        txt="Disclaimer: This report was auto-generated using Google Earth "
-            "Engine and NASA SRTM data. SRTM elevation values have a vertical "
-            "accuracy of approximately 16 meters (absolute). Results should be "
-            "validated with ground-truth data for critical applications. "
+        txt="Disclaimer: Auto-generated using Google Earth Engine and NASA SRTM data. "
+            "Vertical accuracy ~16m. Validate with ground-truth data for critical applications. "
             "Generated on %s." % datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     )
 
@@ -838,18 +989,28 @@ def create_pdf(title, creator, avg, min_e, max_e, std, buf_km, map_img_path, dra
 # ── Sidebar: PDF Report Download ─────────────────────────────────────
 st.sidebar.markdown("---")
 st.sidebar.subheader("📄 Generate Report")
-include_drawn = st.sidebar.checkbox("Include drawn sites in report", value=True)
+st.sidebar.markdown("**Include in report:**")
+inc_drawn = st.sidebar.checkbox("Custom drawn sites", value=True)
+inc_slope = st.sidebar.checkbox("Slope analysis", value=True)
+inc_aspect = st.sidebar.checkbox("Aspect analysis", value=True)
+inc_terrain = st.sidebar.checkbox("Terrain classification", value=True)
 
 if st.sidebar.button("Generate PDF Report", type="primary"):
     with st.sidebar:
-        with st.spinner("Downloading map thumbnail from EE..."):
+        with st.spinner("Downloading map thumbnail..."):
             map_img = get_dem_thumbnail(dem, roi, vis_params)
+
+        with st.spinner("Computing analysis data..."):
+            slope_d = compute_slope_stats(roi_info) if inc_slope else None
+            aspect_d = compute_aspect_histogram(roi_info) if inc_aspect else None
+            terrain_d = compute_terrain_classes(roi_info) if inc_terrain else None
+            drawn_d = st.session_state.drawn_results if inc_drawn else None
+
         with st.spinner("Generating PDF report..."):
-            drawn_list = st.session_state.drawn_stats if include_drawn else None
             pdf_bytes = create_pdf(
                 report_name, user_name,
                 avg_elev, min_elev, max_elev, std_elev, buffer_km,
-                map_img, drawn_list
+                map_img, drawn_d, slope_d, aspect_d, terrain_d
             )
             st.download_button(
                 label="⬇️ Download PDF",
@@ -857,12 +1018,13 @@ if st.sidebar.button("Generate PDF Report", type="primary"):
                 file_name="%s.pdf" % report_name.replace(' ', '_'),
                 mime="application/pdf"
             )
-            st.success("PDF generated successfully!")
+            st.success("PDF generated!")
+
         if map_img and os.path.exists(map_img):
             os.unlink(map_img)
 
 st.sidebar.markdown("---")
 st.sidebar.markdown(
-    "<small style='color:#64748b'>Built with Streamlit &bull; Earth Engine &bull; Folium</small>",
+    "<small style='color:#64748b'>Built with Streamlit &bull; Earth Engine &bull; Folium &bull; Plotly</small>",
     unsafe_allow_html=True
 )

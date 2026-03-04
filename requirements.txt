@@ -2,5 +2,6 @@ streamlit
 streamlit-folium
 earthengine-api
 folium
-click==8
 fpdf
+plotly
+numpy
