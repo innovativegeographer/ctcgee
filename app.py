@@ -4,10 +4,12 @@ import json
 import tempfile
 import os
 import folium
+import folium.plugins as plugins
 import urllib.request
 from streamlit_folium import st_folium
 from fpdf import FPDF
 from datetime import datetime
+import math
 
 # --- PREMIUM PAGE STYLING ---
 st.set_page_config(layout="wide", page_title="NASA SRTM Elevation Explorer")
@@ -81,6 +83,23 @@ st.markdown("""
         padding: 14px 18px;
         box-shadow: 0 2px 8px rgba(0,0,0,0.04);
     }
+
+    .draw-info-box {
+        background: linear-gradient(135deg, #f0fdf4, #dcfce7);
+        border: 1px solid #86efac;
+        border-radius: 12px;
+        padding: 20px;
+        margin: 10px 0;
+    }
+
+    .custom-site-card {
+        background: white;
+        border: 1px solid #e2e8f0;
+        border-radius: 12px;
+        padding: 18px;
+        margin: 8px 0;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.04);
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -93,6 +112,18 @@ report_name = st.sidebar.text_input("Report Title", "Cuttack Elevation Report")
 user_name = st.sidebar.text_input("Your Name", "User")
 buffer_km = st.sidebar.slider("Buffer Radius (km)", 1, 20, 5)
 
+st.sidebar.markdown("---")
+st.sidebar.title("✏️ Drawing Tools")
+st.sidebar.info(
+    "Use the **drawing tools** on the map to draw points, polygons, "
+    "rectangles, or circles. Elevation statistics will be computed "
+    "automatically for your drawn area."
+)
+point_buffer_m = st.sidebar.slider(
+    "Point buffer radius (m)", 100, 5000, 500,
+    help="When you draw a point, this buffer radius is used to create an analysis area around it."
+)
+
 # ── Earth Engine Processing ──────────────────────────────────────────
 CUTTACK_LAT, CUTTACK_LON = 20.4625, 85.8828
 point = ee.Geometry.Point(CUTTACK_LON, CUTTACK_LAT)
@@ -100,7 +131,7 @@ roi = point.buffer(buffer_km * 1000)
 
 dem = ee.Image('USGS/SRTMGL1_003')
 
-# Compute statistics
+# Compute statistics for default ROI
 with st.spinner("Computing elevation statistics from SRTM DEM..."):
     stats = dem.reduceRegion(
         reducer=ee.Reducer.mean()
@@ -118,7 +149,8 @@ std_elev = round(stats.get('elevation_stdDev', 0), 2)
 elev_range = round(max_elev - min_elev, 2)
 
 # ── Display Metrics ──────────────────────────────────────────────────
-st.markdown("### 📊 Elevation Statistics")
+st.markdown("### 📊 Default Study Area — Elevation Statistics")
+st.caption("Based on %s km buffer around Cuttack city center" % buffer_km)
 col1, col2, col3, col4, col5 = st.columns(5)
 col1.metric("📊 Mean", "%.2f m" % avg_elev)
 col2.metric("⬇️ Min", "%.2f m" % min_elev)
@@ -126,7 +158,7 @@ col3.metric("⬆️ Max", "%.2f m" % max_elev)
 col4.metric("📐 Std Dev", "%.2f m" % std_elev)
 col5.metric("📏 Range", "%.2f m" % elev_range)
 
-# ── Build the Map ────────────────────────────────────────────────────
+# ── Build the Map with Drawing Tools ─────────────────────────────────
 vis_params = {
     'min': 0,
     'max': 100,
@@ -178,11 +210,248 @@ folium.Marker(
     icon=folium.Icon(color='red', icon='info-sign')
 ).add_to(m)
 
+# ── Add Drawing Tools ────────────────────────────────────────────────
+draw = plugins.Draw(
+    export=True,
+    position='topleft',
+    draw_options={
+        'polyline': False,
+        'polygon': {
+            'allowIntersection': False,
+            'shapeOptions': {
+                'color': '#3b82f6',
+                'weight': 3,
+                'fillOpacity': 0.2
+            }
+        },
+        'rectangle': {
+            'shapeOptions': {
+                'color': '#8b5cf6',
+                'weight': 3,
+                'fillOpacity': 0.2
+            }
+        },
+        'circle': {
+            'shapeOptions': {
+                'color': '#f59e0b',
+                'weight': 3,
+                'fillOpacity': 0.2
+            }
+        },
+        'marker': True,
+        'circlemarker': False,
+    },
+    edit_options={
+        'edit': True,
+        'remove': True,
+    }
+)
+draw.add_to(m)
+
 folium.LayerControl().add_to(m)
 
-st.markdown("### 🗺️ Study Area Map")
-st.write("**Study Area:** %s km buffer around Cuttack (20.46°N, 85.88°E)" % buffer_km)
-st_folium(m, width=None, height=550, use_container_width=True)
+st.markdown("### 🗺️ Interactive Map — Draw to Analyze")
+st.markdown(
+    "**Study Area:** %s km buffer around Cuttack (20.46°N, 85.88°E) &nbsp;|&nbsp; "
+    "✏️ **Use the toolbar on the left of the map** to draw points, polygons, rectangles, or circles "
+    "and get instant elevation analysis." % buffer_km
+)
+
+# Render map and capture drawn data
+map_data = st_folium(m, width=None, height=600, use_container_width=True)
+
+
+# ══════════════════════════════════════════════════════════════════════
+# DRAWN FEATURE ANALYSIS
+# ══════════════════════════════════════════════════════════════════════
+
+def compute_drawn_stats(geometry):
+    """Compute elevation statistics for a drawn EE geometry."""
+    drawn_stats = dem.reduceRegion(
+        reducer=ee.Reducer.mean()
+            .combine(reducer2=ee.Reducer.minMax(), sharedInputs=True)
+            .combine(reducer2=ee.Reducer.stdDev(), sharedInputs=True),
+        geometry=geometry,
+        scale=30,
+        maxPixels=1e9
+    ).getInfo()
+    return {
+        'mean': round(drawn_stats.get('elevation_mean', 0), 2),
+        'min': round(drawn_stats.get('elevation_min', 0), 2),
+        'max': round(drawn_stats.get('elevation_max', 0), 2),
+        'std': round(drawn_stats.get('elevation_stdDev', 0), 2),
+    }
+
+
+def geojson_to_ee_geometry(feature):
+    """Convert a GeoJSON feature to an Earth Engine geometry."""
+    geom = feature.get('geometry', feature)
+    geom_type = geom.get('type', '')
+    coords = geom.get('coordinates', [])
+
+    if geom_type == 'Point':
+        return ee.Geometry.Point(coords).buffer(point_buffer_m)
+    elif geom_type == 'Polygon':
+        return ee.Geometry.Polygon(coords)
+    elif geom_type == 'LineString':
+        return ee.Geometry.LineString(coords).buffer(100)
+    else:
+        return None
+
+
+def get_feature_label(feature, index):
+    """Generate a human-readable label for a drawn feature."""
+    geom = feature.get('geometry', feature)
+    geom_type = geom.get('type', '')
+    coords = geom.get('coordinates', [])
+
+    if geom_type == 'Point':
+        return "📍 Point %d (%.4f°N, %.4f°E) — %dm buffer" % (
+            index, coords[1], coords[0], point_buffer_m
+        )
+    elif geom_type == 'Polygon':
+        n_vertices = len(coords[0]) - 1 if coords else 0
+        return "🔷 Polygon %d (%d vertices)" % (index, n_vertices)
+    else:
+        return "📐 Shape %d (%s)" % (index, geom_type)
+
+
+# Check if any features were drawn
+all_drawings = map_data.get('all_drawings', []) if map_data else []
+last_drawing = map_data.get('last_active_drawing') if map_data else None
+
+# Store drawn features in session state
+if 'drawn_features' not in st.session_state:
+    st.session_state.drawn_features = []
+if 'drawn_stats' not in st.session_state:
+    st.session_state.drawn_stats = []
+
+# Update drawn features from map
+if all_drawings and len(all_drawings) > 0:
+    st.session_state.drawn_features = all_drawings
+
+st.markdown("---")
+st.markdown("### ✏️ Custom Site Analysis")
+
+if len(st.session_state.drawn_features) > 0:
+    st.success("**%d feature(s) drawn** — Computing elevation statistics..." % len(st.session_state.drawn_features))
+
+    # Process each drawn feature
+    new_stats = []
+    for idx, feature in enumerate(st.session_state.drawn_features, 1):
+        ee_geom = geojson_to_ee_geometry(feature)
+        if ee_geom:
+            try:
+                feature_stats = compute_drawn_stats(ee_geom)
+                label = get_feature_label(feature, idx)
+                new_stats.append({
+                    'label': label,
+                    'stats': feature_stats,
+                    'feature': feature,
+                    'index': idx
+                })
+            except Exception as e:
+                st.warning("Could not compute stats for feature %d: %s" % (idx, str(e)))
+
+    st.session_state.drawn_stats = new_stats
+
+    # Display stats for each drawn feature
+    for item in st.session_state.drawn_stats:
+        s = item['stats']
+        with st.container():
+            st.markdown(
+                '<div class="custom-site-card">',
+                unsafe_allow_html=True
+            )
+            st.markdown("#### %s" % item['label'])
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("📊 Mean", "%.2f m" % s['mean'])
+            c2.metric("⬇️ Min", "%.2f m" % s['min'])
+            c3.metric("⬆️ Max", "%.2f m" % s['max'])
+            c4.metric("📐 Std Dev", "%.2f m" % s['std'])
+            st.markdown('</div>', unsafe_allow_html=True)
+
+    # Comparison table
+    if len(st.session_state.drawn_stats) > 1:
+        st.markdown("#### 📋 Comparison Table")
+        table_data = []
+        for item in st.session_state.drawn_stats:
+            s = item['stats']
+            table_data.append({
+                'Site': item['label'],
+                'Mean (m)': s['mean'],
+                'Min (m)': s['min'],
+                'Max (m)': s['max'],
+                'Std Dev (m)': s['std'],
+                'Range (m)': round(s['max'] - s['min'], 2)
+            })
+        st.dataframe(table_data, use_container_width=True, hide_index=True)
+
+else:
+    st.markdown(
+        '<div class="draw-info-box">'
+        '<h4 style="margin:0 0 8px 0; color:#166534;">✏️ Draw on the map to analyze any area</h4>'
+        '<p style="margin:0; color:#15803d;">'
+        'Use the <strong>drawing toolbar</strong> on the left side of the map to:'
+        '</p>'
+        '<ul style="color:#15803d; margin:8px 0;">'
+        '<li><strong>📍 Marker</strong> — Click to place a point (analyzed with %dm buffer)</li>'
+        '<li><strong>🔷 Polygon</strong> — Click vertices to draw a custom shape</li>'
+        '<li><strong>⬜ Rectangle</strong> — Click and drag to draw a box</li>'
+        '<li><strong>⭕ Circle</strong> — Click and drag to draw a circle</li>'
+        '</ul>'
+        '<p style="margin:0; color:#15803d;">'
+        'Elevation statistics will be computed instantly for your drawn area!'
+        '</p>'
+        '</div>' % point_buffer_m,
+        unsafe_allow_html=True
+    )
+
+# ── Manual Coordinate Input ──────────────────────────────────────────
+st.markdown("---")
+st.markdown("### 📍 Analyze by Coordinates")
+st.caption("Enter latitude and longitude manually to analyze a specific point.")
+
+coord_col1, coord_col2, coord_col3 = st.columns([2, 2, 1])
+with coord_col1:
+    manual_lat = st.number_input("Latitude", value=20.4625, format="%.4f", step=0.01)
+with coord_col2:
+    manual_lon = st.number_input("Longitude", value=85.8828, format="%.4f", step=0.01)
+with coord_col3:
+    manual_buffer = st.number_input("Buffer (m)", value=500, min_value=100, max_value=10000, step=100)
+
+if st.button("🔍 Analyze This Location", type="primary"):
+    with st.spinner("Computing elevation for (%.4f, %.4f)..." % (manual_lat, manual_lon)):
+        manual_geom = ee.Geometry.Point(manual_lon, manual_lat).buffer(manual_buffer)
+        manual_stats = compute_drawn_stats(manual_geom)
+
+        st.markdown("#### 📍 Results for (%.4f°N, %.4f°E) — %dm buffer" % (manual_lat, manual_lon, manual_buffer))
+        mc1, mc2, mc3, mc4 = st.columns(4)
+        mc1.metric("📊 Mean", "%.2f m" % manual_stats['mean'])
+        mc2.metric("⬇️ Min", "%.2f m" % manual_stats['min'])
+        mc3.metric("⬆️ Max", "%.2f m" % manual_stats['max'])
+        mc4.metric("📐 Std Dev", "%.2f m" % manual_stats['std'])
+
+        # Quick interpretation
+        avg_m = manual_stats['mean']
+        if avg_m < 10:
+            terrain = "very low-lying coastal/floodplain"
+        elif avg_m < 50:
+            terrain = "low-elevation alluvial plain"
+        elif avg_m < 200:
+            terrain = "moderately elevated terrain"
+        elif avg_m < 500:
+            terrain = "elevated/hilly terrain"
+        else:
+            terrain = "high-altitude mountainous terrain"
+
+        st.info(
+            "**Quick Interpretation:** This location has a mean elevation of **%.2f m**, "
+            "classified as **%s**. Elevation ranges from **%.2f m** to **%.2f m** "
+            "within the %dm analysis buffer." % (
+                avg_m, terrain, manual_stats['min'], manual_stats['max'], manual_buffer
+            )
+        )
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -309,7 +578,7 @@ def section_heading(pdf, num, title):
     pdf.ln(3)
 
 
-def create_pdf(title, creator, avg, min_e, max_e, std, buf_km, map_img_path):
+def create_pdf(title, creator, avg, min_e, max_e, std, buf_km, map_img_path, drawn_stats_list=None):
     pdf = ReportPDF()
     pdf.set_auto_page_break(auto=True, margin=20)
 
@@ -380,7 +649,6 @@ def create_pdf(title, creator, avg, min_e, max_e, std, buf_km, map_img_path):
     # ═══════════════════════════════════════════════════════════════
     pdf.add_page()
 
-    # Section 1: Location Details
     section_heading(pdf, 1, "LOCATION DETAILS")
     pdf.set_font("Arial", size=11)
     pdf.cell(0, 7, txt="City: Cuttack, Odisha, India", ln=True)
@@ -390,10 +658,8 @@ def create_pdf(title, creator, avg, min_e, max_e, std, buf_km, map_img_path):
     pdf.cell(0, 7, txt="Region: Mahanadi River Delta, Eastern India", ln=True)
     pdf.ln(4)
 
-    # Section 2: Map Metadata
     section_heading(pdf, 2, "MAP METADATA")
     pdf.set_font("Arial", size=11)
-
     pdf.set_fill_color(240, 240, 240)
     pdf.set_draw_color(200, 200, 200)
     map_meta = [
@@ -421,7 +687,6 @@ def create_pdf(title, creator, avg, min_e, max_e, std, buf_km, map_img_path):
         pdf.cell(105, 7, "  %s" % v, border=1, fill=True, ln=True)
     pdf.ln(4)
 
-    # Section 3: Methodology
     section_heading(pdf, 3, "METHODOLOGY")
     pdf.set_font("Arial", size=10)
     method_steps = [
@@ -432,25 +697,20 @@ def create_pdf(title, creator, avg, min_e, max_e, std, buf_km, map_img_path):
         "",
         "Step 2: DEM Data Acquisition",
         "The NASA SRTM Global 1 arc-second DEM (USGS/SRTMGL1_003) was loaded "
-        "from the Google Earth Engine data catalog. This dataset provides "
-        "near-global elevation data at approximately 30-meter resolution.",
+        "from the Google Earth Engine data catalog.",
         "",
         "Step 3: Statistical Analysis",
         "Zonal statistics were computed using ee.Image.reduceRegion() with "
-        "combined reducers (mean, min, max, stdDev) over the ROI at native "
-        "30m resolution. The maxPixels parameter was set to 1e9 to ensure "
-        "complete coverage.",
+        "combined reducers (mean, min, max, stdDev) over the ROI at 30m resolution.",
         "",
-        "Step 4: Visualization",
-        "The DEM was visualized using a five-color palette (green to white) "
-        "with min=0m and max=100m, optimized for the low-elevation coastal "
-        "terrain of the Cuttack region. The map was rendered using Folium "
-        "with Earth Engine tile layers.",
+        "Step 4: Interactive Drawing Analysis",
+        "Users can draw custom polygons, rectangles, circles, or place points "
+        "on the interactive map. Elevation statistics are computed on-the-fly "
+        "for each drawn feature using the same SRTM DEM dataset.",
         "",
         "Step 5: Report Generation",
         "Statistics, map thumbnail, and interpretation were compiled into "
-        "this PDF report using the FPDF library integrated with the "
-        "Streamlit web application.",
+        "this PDF report using FPDF integrated with the Streamlit application.",
     ]
     for line in method_steps:
         if line == "":
@@ -467,8 +727,7 @@ def create_pdf(title, creator, avg, min_e, max_e, std, buf_km, map_img_path):
     # ═══════════════════════════════════════════════════════════════
     pdf.add_page()
 
-    # Section 4: Elevation Statistics
-    section_heading(pdf, 4, "ELEVATION STATISTICS")
+    section_heading(pdf, 4, "ELEVATION STATISTICS — DEFAULT STUDY AREA")
 
     pdf.set_font("Arial", 'B', 11)
     pdf.set_fill_color(0, 102, 51)
@@ -502,8 +761,48 @@ def create_pdf(title, creator, avg, min_e, max_e, std, buf_km, map_img_path):
 
     pdf.ln(6)
 
-    # Section 5: Interpretation
-    section_heading(pdf, 5, "INTERPRETATION & ANALYSIS")
+    # ── Drawn Features Stats in PDF ──────────────────────────────
+    if drawn_stats_list and len(drawn_stats_list) > 0:
+        section_heading(pdf, 5, "CUSTOM DRAWN SITE ANALYSIS")
+        pdf.set_font("Arial", size=10)
+        pdf.multi_cell(0, 5,
+            txt="The following elevation statistics were computed for user-drawn "
+                "features on the interactive map."
+        )
+        pdf.ln(3)
+
+        for item in drawn_stats_list:
+            s = item['stats']
+            # Site heading
+            pdf.set_font("Arial", 'B', 11)
+            pdf.set_text_color(0, 102, 51)
+            pdf.cell(0, 8, txt=item['label'], ln=True)
+            pdf.set_text_color(0, 0, 0)
+            pdf.set_font("Arial", size=10)
+
+            # Mini stats table
+            pdf.set_fill_color(245, 245, 245)
+            pdf.set_draw_color(200, 200, 200)
+            mini_rows = [
+                ("Mean Elevation", "%.2f m" % s['mean']),
+                ("Min Elevation", "%.2f m" % s['min']),
+                ("Max Elevation", "%.2f m" % s['max']),
+                ("Std Dev", "%.2f m" % s['std']),
+                ("Range", "%.2f m" % (s['max'] - s['min'])),
+            ]
+            for mk, mv in mini_rows:
+                pdf.set_font("Arial", 'B', 9)
+                pdf.cell(60, 7, "  %s" % mk, border=1, fill=True)
+                pdf.set_font("Arial", size=9)
+                pdf.cell(40, 7, "  %s" % mv, border=1, ln=True)
+            pdf.ln(4)
+
+        next_section = 6
+    else:
+        next_section = 5
+
+    # Section: Interpretation
+    section_heading(pdf, next_section, "INTERPRETATION & ANALYSIS")
     pdf.set_font("Arial", size=10)
 
     interp_lines = get_interpretation(avg, min_e, max_e, std, max_e - min_e, buf_km)
@@ -532,7 +831,6 @@ def create_pdf(title, creator, avg, min_e, max_e, std, buf_km, map_img_path):
             "Generated on %s." % datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     )
 
-    # Return as bytes
     pdf_str = pdf.output(dest='S')
     return pdf_str.encode('latin-1')
 
@@ -540,15 +838,18 @@ def create_pdf(title, creator, avg, min_e, max_e, std, buf_km, map_img_path):
 # ── Sidebar: PDF Report Download ─────────────────────────────────────
 st.sidebar.markdown("---")
 st.sidebar.subheader("📄 Generate Report")
+include_drawn = st.sidebar.checkbox("Include drawn sites in report", value=True)
+
 if st.sidebar.button("Generate PDF Report", type="primary"):
     with st.sidebar:
         with st.spinner("Downloading map thumbnail from EE..."):
             map_img = get_dem_thumbnail(dem, roi, vis_params)
         with st.spinner("Generating PDF report..."):
+            drawn_list = st.session_state.drawn_stats if include_drawn else None
             pdf_bytes = create_pdf(
                 report_name, user_name,
                 avg_elev, min_elev, max_elev, std_elev, buffer_km,
-                map_img
+                map_img, drawn_list
             )
             st.download_button(
                 label="⬇️ Download PDF",
@@ -557,12 +858,11 @@ if st.sidebar.button("Generate PDF Report", type="primary"):
                 mime="application/pdf"
             )
             st.success("PDF generated successfully!")
-        # Clean up temp file
         if map_img and os.path.exists(map_img):
             os.unlink(map_img)
 
 st.sidebar.markdown("---")
 st.sidebar.markdown(
-    "<small style='color:#64748b'>Built with Streamlit • Earth Engine • Folium</small>",
+    "<small style='color:#64748b'>Built with Streamlit &bull; Earth Engine &bull; Folium</small>",
     unsafe_allow_html=True
 )
