@@ -9,10 +9,10 @@ with st.echo():
     from streamlit_folium import folium_static
     import ee
     try:
-        ee.Initialize(project='spatialgeography')
+        ee.Initialize(project='ee-innovativegeographer')
     except Exception as e:
         ee.Authenticate()
-        ee.Initialize(project='spatialgeography')
+        ee.Initialize(project='ee-innovativegeographer')
     import geemap
 
     m = geemap.Map()
