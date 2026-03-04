@@ -16,22 +16,22 @@ st.title("🌍 Earth Engine SRTM DEM Explorer — Cuttack")
 @st.cache_resource
 def init_ee():
     try:
-        ee.Initialize(project='spatialgeography')
+        ee.Initialize(project='ee-innovativegeographer')
     except Exception:
         try:
             if 'EARTHENGINE_TOKEN' in st.secrets:
                 os.environ['EARTHENGINE_TOKEN'] = st.secrets['EARTHENGINE_TOKEN']
-                ee.Initialize(project='spatialgeography')
+                ee.Initialize(project='ee-innovativegeographer')
             elif 'EE_SERVICE_ACCOUNT' in st.secrets:
                 sa_info = json.loads(st.secrets['EE_SERVICE_ACCOUNT'])
                 credentials = ee.ServiceAccountCredentials(
                     sa_info['client_email'],
                     key_data=st.secrets['EE_SERVICE_ACCOUNT']
                 )
-                ee.Initialize(credentials, project='spatialgeography')
+                ee.Initialize(credentials, project='ee-innovativegeographer')
             else:
                 ee.Authenticate()
-                ee.Initialize(project='spatialgeography')
+                ee.Initialize(project='ee-innovativegeographer')
         except Exception as e:
             st.error("Earth Engine init failed: %s" % e)
             st.stop()
@@ -234,7 +234,7 @@ class ReportPDF(FPDF):
         self.set_font("Arial", 'I', 8)
         self.set_text_color(150, 150, 150)
         self.cell(0, 10,
-                  "Generated via Google Earth Engine | Project: spatialgeography | Page %s" % self.page_no(),
+                  "Generated via Google Earth Engine | Project: ee-innovativegeographer | Page %s" % self.page_no(),
                   align='C')
 
 
@@ -278,7 +278,7 @@ def create_pdf(title, creator, avg, min_e, max_e, std, buf_km, map_img_path):
         ("Report Title:", title),
         ("Prepared By:", creator),
         ("Date Generated:", datetime.now().strftime('%B %d, %Y at %H:%M')),
-        ("GEE Project:", "spatialgeography"),
+        ("GEE Project:", "ee-innovativegeographer"),
         ("Coordinate System:", "WGS 84 (EPSG:4326)"),
     ]
     for label, val in meta_rows:
