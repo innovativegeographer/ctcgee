@@ -1,31 +1,89 @@
 import streamlit as st
+import ee
+import geemap.foliumap as geemap
 from streamlit_folium import folium_static
-import folium
 
-"# streamlit-geemap"
+# --- PREMIUM PAGE STYLING ---
+st.set_page_config(layout="wide", page_title="NASA SRTM elevation Explorer")
 
+# Inject custom CSS for a premium "Folium Example" look
+st.markdown("""
+<style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;700;800&display=swap');
+    
+    html, body, [data-testid="stSidebar"] {
+        font-family: 'Inter', sans-serif;
+    }
+    
+    h1 {
+        font-weight: 800;
+        color: #1e293b;
+        letter-spacing: -1px;
+        margin-bottom: 0.5rem;
+    }
+    
+    .stEcho {
+        background-color: #ffffff;
+        border: 1px solid #e2e8f0;
+        border-radius: 12px;
+        padding: 20px;
+        box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1);
+    }
+    
+    .main {
+        background-color: #f8fafc;
+    }
+</style>
+""", unsafe_allow_html=True)
+
+st.title("🛰️ NASA SRTM Global elevation")
+st.write("A clean demonstration of using Google Earth Engine with Streamlit & Folium.")
+
+# --- THE CODE BLOCK (AS SEEN IN THE USER'S SCREENSHOT) ---
 with st.echo():
     import streamlit as st
-    from streamlit_folium import folium_static
     import ee
+    import geemap.foliumap as geemap
+    from streamlit_folium import folium_static
+
+    # 1. Initialize Earth Engine (Change project ID if necessary)
     try:
         ee.Initialize(project='ee-innovativegeographer')
-    except Exception as e:
-        ee.Authenticate()
+    except Exception:
+        # If running locally, you might need to authenticate first
+        # ee.Authenticate()
         ee.Initialize(project='ee-innovativegeographer')
-    import geemap
 
-    m = geemap.Map()
+    # 2. Define location (Cuttack, Odisha)
+    lat, lon = 20.4625, 85.8828
+    
+    # 3. Load the SRTM Elevation dataset
+    srtm = ee.Image('USGS/SRTMGL1_003')
 
-    dem = ee.Image('USGS/SRTMGL1_003')
-    # Set visualization parameters.
+    # 4. Set visualization parameters (Premium Palette)
     vis_params = {
-    'min': 0,
-    'max': 4000,
-    'palette': ['006633', 'E5FFCC', '662A00', 'D8D8D8', 'F5F5F5']}
+        'min': 0,
+        'max': 100,
+        'palette': ['#006633', '#E5FFCC', '#662A00', '#D8D8D8', '#F5F5F5']
+    }
 
-    m.addLayer(dem, vis_params, 'DEM')
+    # 5. Create a Map centered on the location
+    m = geemap.Map(center=[lat, lon], zoom=12)
+
+    # 6. Add SRTM Layer
+    m.addLayer(srtm, vis_params, 'SRTM Elevation')
+    
+    # 7. Add a Hillshade layer for the "WOW" texture factor
+    hillshade = ee.Terrain.hillshade(srtm)
+    m.addLayer(hillshade, {'opacity': 0.3}, 'Hillshade (3D Texture)')
+
+    # 8. Add a marker for the city center
+    m.add_marker([lat, lon], tooltip="Cuttack City Center")
+
+    # 9. Add Layer Control for easy toggling
     m.addLayerControl()
 
-    # call to render geemap in Streamlit
-    m.to_streamlit()
+    # 10. Call to render Folium map in Streamlit
+    folium_static(m, width=1200, height=600)
+
+st.success("✅ Map rendered successfully using Earth Engine tiles.")
