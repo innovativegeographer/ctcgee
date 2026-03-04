@@ -16,25 +16,24 @@ st.title("🌍 Earth Engine SRTM DEM Explorer — Cuttack")
 @st.cache_resource
 def init_ee():
     try:
-        ee.Initialize(project='ee-innovativegeographer')
-    except Exception:
-        try:
-            if 'EARTHENGINE_TOKEN' in st.secrets:
-                os.environ['EARTHENGINE_TOKEN'] = st.secrets['EARTHENGINE_TOKEN']
-                ee.Initialize(project='ee-innovativegeographer')
-            elif 'EE_SERVICE_ACCOUNT' in st.secrets:
-                sa_info = json.loads(st.secrets['EE_SERVICE_ACCOUNT'])
-                credentials = ee.ServiceAccountCredentials(
-                    sa_info['client_email'],
-                    key_data=st.secrets['EE_SERVICE_ACCOUNT']
-                )
-                ee.Initialize(credentials, project='ee-innovativegeographer')
-            else:
-                ee.Authenticate()
-                ee.Initialize(project='ee-innovativegeographer')
-        except Exception as e:
-            st.error("Earth Engine init failed: %s" % e)
-            st.stop()
+        if 'EE_SERVICE_ACCOUNT' in st.secrets:
+            # For Streamlit Cloud: Use Service Account from Secrets
+            import json
+            sa_info = json.loads(st.secrets['EE_SERVICE_ACCOUNT'])
+            credentials = ee.ServiceAccountCredentials(
+                sa_info['client_email'],
+                key_data=st.secrets['EE_SERVICE_ACCOUNT']
+            )
+            ee.Initialize(credentials, project='ee-innovativegeographer')
+        else:
+            # For Local Development: Falls back to local 'earthengine authenticate' credentials
+            ee.Initialize(project='ee-innovativegeographer')
+    except Exception as e:
+        st.error("🔑 **Earth Engine Authentication Failed**")
+        st.info("To fix this on Streamlit Cloud, ensure you have added your service account JSON to `.streamlit/secrets.toml` or the Streamlit Dashboard Secrets box.")
+        st.code("""EE_SERVICE_ACCOUNT = '''\n{\n  "type": "service_account",\n  ...\n}'''""", language="toml")
+        st.write(f"**Error Details:** {e}")
+        st.stop()
 
 with st.spinner("Initializing Earth Engine..."):
     init_ee()

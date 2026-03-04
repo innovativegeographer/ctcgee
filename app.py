@@ -54,21 +54,15 @@ with st.echo():
     try:
         if 'EE_SERVICE_ACCOUNT' in st.secrets:
             # For Streamlit Cloud: Use Service Account from Secrets
-            # We'll save it to a temporary file as some GEE functions prefer a file path
-            with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.json') as f:
-                f.write(st.secrets['EE_SERVICE_ACCOUNT'])
-                temp_path = f.name
-            
-            try:
-                credentials = ee.ServiceAccountCredentials('', temp_path)
-                ee.Initialize(credentials, project='ee-innovativegeographer')
-            finally:
-                # Cleanup: remove the temp file
-                if os.path.exists(temp_path):
-                    os.unlink(temp_path)
+            import json
+            sa_info = json.loads(st.secrets['EE_SERVICE_ACCOUNT'])
+            credentials = ee.ServiceAccountCredentials(
+                sa_info['client_email'],
+                key_data=st.secrets['EE_SERVICE_ACCOUNT']
+            )
+            ee.Initialize(credentials, project='ee-innovativegeographer')
         else:
             # For Local Development: Falls back to local 'earthengine authenticate' credentials
-            # This will fail on Streamlit Cloud if secrets are not set, which is intended
             ee.Initialize(project='ee-innovativegeographer')
     except Exception as e:
         st.error("🔑 **Earth Engine Authentication Failed**")

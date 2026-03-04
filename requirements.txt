@@ -3,3 +3,4 @@ streamlit-folium
 geemap
 leafmap
 click==8
+fpdf
