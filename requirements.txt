@@ -4,3 +4,5 @@ geemap
 leafmap
 click==8
 fpdf
+python-box==6.1.0
+xyzservices
