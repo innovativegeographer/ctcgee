@@ -47,21 +47,34 @@ with st.echo():
     from streamlit_folium import folium_static
 
     import json
+    import tempfile
+    import os
+
     # --- AUTHENTICATION LOGIC ---
     try:
         if 'EE_SERVICE_ACCOUNT' in st.secrets:
             # For Streamlit Cloud: Use Service Account from Secrets
-            sa_info = json.loads(st.secrets['EE_SERVICE_ACCOUNT'])
-            credentials = ee.ServiceAccountCredentials(
-                sa_info['client_email'],
-                key_data=st.secrets['EE_SERVICE_ACCOUNT']
-            )
-            ee.Initialize(credentials, project='ee-innovativegeographer')
+            # We'll save it to a temporary file as some GEE functions prefer a file path
+            with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.json') as f:
+                f.write(st.secrets['EE_SERVICE_ACCOUNT'])
+                temp_path = f.name
+            
+            try:
+                credentials = ee.ServiceAccountCredentials('', temp_path)
+                ee.Initialize(credentials, project='ee-innovativegeographer')
+            finally:
+                # Cleanup: remove the temp file
+                if os.path.exists(temp_path):
+                    os.unlink(temp_path)
         else:
-            # For Local Development: Use User Authentication
+            # For Local Development: Falls back to local 'earthengine authenticate' credentials
+            # This will fail on Streamlit Cloud if secrets are not set, which is intended
             ee.Initialize(project='ee-innovativegeographer')
     except Exception as e:
-        st.error(f"Earth Engine Initialization failed: {e}")
+        st.error("🔑 **Earth Engine Authentication Failed**")
+        st.info("To fix this on Streamlit Cloud, ensure you have added your service account JSON to `.streamlit/secrets.toml` or the Streamlit Dashboard Secrets box.")
+        st.code("""EE_SERVICE_ACCOUNT = '''\n{\n  "type": "service_account",\n  ...\n}'''""", language="toml")
+        st.write(f"**Error Details:** {e}")
         st.stop()
 
     # 2. Define location (Cuttack, Odisha)
